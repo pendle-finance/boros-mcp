@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign Transaction - Boros MCP</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e4e4e7;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .container {
+      background: #1a1b23;
+      border: 1px solid #2e2f3a;
+      border-radius: 16px;
+      padding: 32px;
+      max-width: 480px;
+      width: 100%;
+      margin: 20px;
+    }
+    .logo { font-size: 1.5em; font-weight: 700; margin-bottom: 4px; color: #fff; }
+    .subtitle { color: #71717a; font-size: 0.9em; margin-bottom: 24px; }
+    .info-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 0; border-bottom: 1px solid #2e2f3a; font-size: 0.9em;
+    }
+    .info-row:last-of-type { border-bottom: none; }
+    .info-label { color: #a1a1aa; }
+    .info-value {
+      color: #e4e4e7; font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85em; word-break: break-all; max-width: 260px; text-align: right;
+    }
+    .section {
+      background: #12131a; border: 1px solid #2e2f3a;
+      border-radius: 10px; padding: 16px; margin: 16px 0;
+    }
+    .section-title {
+      font-size: 0.8em; color: #71717a; text-transform: uppercase;
+      letter-spacing: 0.05em; margin-bottom: 12px;
+    }
+    .btn {
+      width: 100%; padding: 12px; border: none; border-radius: 10px;
+      font-size: 1em; font-weight: 600; cursor: pointer; transition: all 0.2s; margin-top: 8px;
+    }
+    .btn-primary { background: #6366f1; color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #4f46e5; }
+    .btn-primary:disabled { background: #3f3f46; color: #71717a; cursor: not-allowed; }
+    .btn-connect { background: #2563eb; color: #fff; }
+    .btn-connect:hover { background: #1d4ed8; }
+    .btn-cancel { background: transparent; color: #a1a1aa; border: 1px solid #2e2f3a; }
+    .btn-cancel:hover:not(:disabled) { background: #1a1b23; color: #e4e4e7; border-color: #3f3f46; }
+    .status-bar {
+      display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+      border-radius: 8px; font-size: 0.85em; margin: 12px 0;
+    }
+    .status-bar.connected { background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.2); color: #22c55e; }
+    .status-bar.warning { background: rgba(234, 179, 8, 0.1); border: 1px solid rgba(234, 179, 8, 0.2); color: #eab308; }
+    .status-bar.error { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; }
+    .status-bar.success { background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.2); color: #22c55e; }
+    .status-bar.info { background: rgba(99, 102, 241, 0.1); border: 1px solid rgba(99, 102, 241, 0.2); color: #a5b4fc; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot.green { background: #22c55e; }
+    .dot.yellow { background: #eab308; }
+    .hidden { display: none; }
+    .spinner {
+      display: inline-block; width: 16px; height: 16px;
+      border: 2px solid #71717a; border-top-color: #6366f1; border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .addr { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85em; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">Boros MCP</div>
+    <div class="subtitle" id="page-subtitle">Sign Transaction</div>
+
+    <div id="step-connect">
+      <p style="color:#a1a1aa; font-size:0.9em; margin-bottom:16px;">
+        Connect your wallet to sign and submit this transaction.
+      </p>
+      <button class="btn btn-connect" id="btn-connect" onclick="connectWallet()">Connect Wallet</button>
+      <div id="no-wallet" class="status-bar error hidden">
+        No wallet extension detected. Install MetaMask or Rabby.
+      </div>
+    </div>
+
+    <div id="step-sign" class="hidden">
+      <div id="wallet-status" class="status-bar connected">
+        <span class="dot green"></span>
+        <span>Connected: <span id="connected-address" class="addr"></span></span>
+      </div>
+
+      <div id="wrong-wallet" class="status-bar warning hidden">
+        <span class="dot yellow"></span>
+        <span>Please switch to wallet <span id="expected-address" class="addr"></span></span>
+      </div>
+
+      <div class="section">
+        <div class="section-title" id="tx-title">Transaction</div>
+        <div id="tx-fields"></div>
+        <div class="info-row">
+          <span class="info-label">Chain</span>
+          <span class="info-value">Arbitrum One</span>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="btn-sign" onclick="sign()">Sign & Submit</button>
+      <button class="btn btn-cancel" id="btn-cancel" onclick="cancelFlow()">Cancel</button>
+    </div>
+
+    <div id="msg-checking" class="status-bar info hidden">
+      <span class="spinner"></span>
+      <span>Checking token allowance...</span>
+    </div>
+    <div id="msg-approving" class="status-bar info hidden">
+      <span class="spinner"></span>
+      <span>Please approve token spending in your wallet...</span>
+    </div>
+    <div id="msg-approve-waiting" class="status-bar info hidden">
+      <span class="spinner"></span>
+      <span>Waiting for approval transaction to confirm...</span>
+    </div>
+    <div id="msg-signing" class="status-bar info hidden">
+      <span class="spinner"></span>
+      <span>Please confirm in your wallet...</span>
+    </div>
+    <div id="msg-waiting" class="status-bar info hidden">
+      <span class="spinner"></span>
+      <span>Waiting for confirmation...</span>
+    </div>
+    <div id="msg-success" class="status-bar success hidden">
+      <span id="success-text">Done! You can close this tab.</span>
+    </div>
+    <div id="msg-error" class="status-bar error hidden">
+      <span id="error-text"></span>
+    </div>
+  </div>
+
+  <script type="application/json" id="tx-data-json">{{TX_DATA}}</script>
+  <script>
+    const CONFIG = {
+      routerAddress: '{{ROUTER_ADDRESS}}',
+      chainId: '{{CHAIN_ID}}',
+      rpcUrl: '{{RPC_URL}}',
+      token: '{{TOKEN}}',
+      port: '{{PORT}}',
+      expectedAddress: '{{EXPECTED_ADDRESS}}',
+    };
+
+    let txData = null;
+    try {
+      const el = document.getElementById('tx-data-json');
+      if (el && el.textContent.indexOf('TX_DATA') === -1) {
+        txData = JSON.parse(el.textContent);
+      }
+    } catch (e) { /* ignore */ }
+
+    const ARBITRUM_CHAIN_ID = '0x' + parseInt(CONFIG.chainId).toString(16);
+    const ERC20_ALLOWANCE_SIG = '0xdd62ed3e';
+    const ERC20_APPROVE_SIG = '0x095ea7b3';
+    let connectedAddress = null;
+
+    function shortAddr(addr) { return addr ? addr.slice(0, 6) + '...' + addr.slice(-4) : ''; }
+    function showEl(id) { document.getElementById(id).classList.remove('hidden'); }
+    function hideEl(id) { document.getElementById(id).classList.add('hidden'); }
+    function showError(msg) {
+      document.getElementById('error-text').textContent = msg;
+      showEl('msg-error');
+    }
+    function hideAllMessages() {
+      ['msg-checking', 'msg-approving', 'msg-approve-waiting', 'msg-signing', 'msg-waiting', 'msg-success', 'msg-error'].forEach(hideEl);
+    }
+    function padTo32Bytes(hexStr) {
+      return hexStr.replace(/^0x/i, '').toLowerCase().padStart(64, '0');
+    }
+    async function getAllowance(tokenAddress, owner, spender) {
+      const data = ERC20_ALLOWANCE_SIG + padTo32Bytes(owner) + padTo32Bytes(spender);
+      return window.ethereum.request({
+        method: 'eth_call',
+        params: [{ to: tokenAddress, data: data }, 'latest'],
+      });
+    }
+    async function approveToken(tokenAddress, spender, amount) {
+      const data = ERC20_APPROVE_SIG + padTo32Bytes(spender) + padTo32Bytes(amount);
+      return window.ethereum.request({
+        method: 'eth_sendTransaction',
+        params: [{ from: connectedAddress, to: tokenAddress, data: data }],
+      });
+    }
+
+    function renderFields() {
+      if (!txData) return;
+      // Generic action label — audit §5 LOW task 3. sign-tx is reused for several tools
+      // (pay_gas, cash_transfer, enter_exit_markets, vault_pay_treasury, revoke_agent)
+      // and the page previously always read "Sign Transaction". Map the `type` string to
+      // a human label so the title reflects which tool is requesting the signature.
+      const subtitleMap = {
+        revoke_agent: 'Revoke Trading Agent',
+        vault_pay_treasury: 'Vault Pay Treasury',
+        pay_gas: 'Top Up Gas Budget',
+        cash_transfer: 'Cash Transfer',
+        enter_markets: 'Enter Markets',
+        exit_markets: 'Exit Markets',
+      };
+      const label = subtitleMap[txData.type] || 'Sign Transaction';
+      document.title = label + ' - Boros MCP';
+      document.getElementById('page-subtitle').textContent = label;
+      document.getElementById('tx-title').textContent = label.toUpperCase() + ' DETAILS';
+
+      const fieldsEl = document.getElementById('tx-fields');
+      const rows = [];
+      if (txData.type === 'revoke_agent') {
+        if (txData.agentAddress) rows.push(['Agent', shortAddr(txData.agentAddress)]);
+        if (txData.accountId !== undefined) rows.push(['Account ID', String(txData.accountId)]);
+      } else if (txData.type === 'vault_pay_treasury') {
+        if (txData.symbol) rows.push(['Token', txData.symbol]);
+        if (txData.humanAmount) rows.push(['Amount', txData.humanAmount + (txData.symbol ? ' ' + txData.symbol : '')]);
+      }
+      fieldsEl.innerHTML = rows.map(([k, v]) => (
+        '<div class="info-row"><span class="info-label">' + k + '</span>' +
+        '<span class="info-value">' + v + '</span></div>'
+      )).join('');
+    }
+
+    async function ensureArbitrumChain() {
+      const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+      if (chainId !== ARBITRUM_CHAIN_ID) {
+        try {
+          await window.ethereum.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: ARBITRUM_CHAIN_ID }],
+          });
+        } catch (switchErr) {
+          if (switchErr.code === 4902) {
+            await window.ethereum.request({
+              method: 'wallet_addEthereumChain',
+              params: [{
+                chainId: ARBITRUM_CHAIN_ID,
+                chainName: 'Arbitrum One',
+                nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+                rpcUrls: [CONFIG.rpcUrl],
+                blockExplorerUrls: ['https://arbiscan.io'],
+              }],
+            });
+          } else { throw switchErr; }
+        }
+      }
+    }
+
+    function checkAddressMatch() {
+      if (!CONFIG.expectedAddress || !connectedAddress) return true;
+      const expected = CONFIG.expectedAddress.toLowerCase();
+      if (!expected) return true;
+      const match = connectedAddress === expected;
+      if (!match) {
+        document.getElementById('expected-address').textContent = shortAddr(CONFIG.expectedAddress);
+        showEl('wrong-wallet');
+      } else {
+        hideEl('wrong-wallet');
+      }
+      return match;
+    }
+
+    async function connectWallet() {
+      if (!window.ethereum) { showEl('no-wallet'); return; }
+      try {
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        if (!accounts || accounts.length === 0) { showError('No accounts.'); return; }
+        connectedAddress = accounts[0].toLowerCase();
+        await ensureArbitrumChain();
+        document.getElementById('connected-address').textContent = shortAddr(connectedAddress);
+        renderFields();
+        hideEl('step-connect');
+        showEl('step-sign');
+        checkAddressMatch();
+        window.ethereum.on('accountsChanged', function(accounts) {
+          if (accounts.length > 0) {
+            connectedAddress = accounts[0].toLowerCase();
+            document.getElementById('connected-address').textContent = shortAddr(connectedAddress);
+            checkAddressMatch();
+          }
+        });
+      } catch (err) {
+        showError('Failed to connect: ' + (err.message || err));
+      }
+    }
+
+    async function waitForReceipt(txHash) {
+      while (true) {
+        const receipt = await window.ethereum.request({
+          method: 'eth_getTransactionReceipt', params: [txHash],
+        });
+        if (receipt) {
+          if (receipt.status === '0x0') throw new Error('Transaction reverted');
+          return receipt;
+        }
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+
+    async function sign() {
+      hideAllMessages();
+      if (!checkAddressMatch()) { showError('Switch to the correct wallet address.'); return; }
+      if (!txData || !txData.tx || !txData.tx.data) { showError('No transaction data.'); return; }
+
+      const btn = document.getElementById('btn-sign');
+      btn.disabled = true;
+      try {
+        await ensureArbitrumChain();
+
+        if (txData.tokenAddress && txData.tokenAddress !== '0x0000000000000000000000000000000000000000' && txData.rawAmount) {
+          showEl('msg-checking');
+          const spender = txData.tx.to || CONFIG.routerAddress;
+          const allowance = await getAllowance(txData.tokenAddress, connectedAddress, spender);
+          const allowanceBn = BigInt(allowance);
+          const requiredBn = BigInt(txData.rawAmount);
+          if (allowanceBn < requiredBn) {
+            hideEl('msg-checking');
+            if (allowanceBn > 0n && txData.requiresResetApproval) {
+              showEl('msg-approving');
+              const resetTxHash = await approveToken(txData.tokenAddress, spender, '0'.padStart(64, '0'));
+              hideEl('msg-approving');
+              showEl('msg-approve-waiting');
+              await waitForReceipt(resetTxHash);
+              hideEl('msg-approve-waiting');
+            }
+            showEl('msg-approving');
+            const approveTxHash = await approveToken(txData.tokenAddress, spender, padTo32Bytes(requiredBn.toString(16)));
+            hideEl('msg-approving');
+            showEl('msg-approve-waiting');
+            await waitForReceipt(approveTxHash);
+            hideEl('msg-approve-waiting');
+          } else {
+            hideEl('msg-checking');
+          }
+        }
+
+        showEl('msg-signing');
+        const txHash = await window.ethereum.request({
+          method: 'eth_sendTransaction',
+          params: [{
+            from: txData.tx.from || connectedAddress,
+            to: txData.tx.to || CONFIG.routerAddress,
+            data: txData.tx.data,
+            // gas is a backend-provided string; parseInt loses precision past 2^53.
+            ...(txData.tx.gas ? { gas: '0x' + BigInt(txData.tx.gas).toString(16) } : {}),
+          }],
+        });
+        hideEl('msg-signing');
+        showEl('msg-waiting');
+        const receipt = await waitForReceipt(txHash);
+        hideEl('msg-waiting');
+        const res = await fetch('/api/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: CONFIG.token, txHash,
+            receipt: { status: receipt.status, blockNumber: receipt.blockNumber },
+          }),
+        });
+        const result = await res.json();
+        if (result.ok) {
+          document.getElementById('success-text').textContent =
+            'Submitted! Tx: ' + shortAddr(txHash) + '. You can close this tab.';
+          showEl('msg-success');
+          btn.textContent = 'Done';
+        } else {
+          showError(result.error || 'Server did not confirm.');
+          btn.disabled = false;
+        }
+      } catch (err) {
+        hideAllMessages();
+        if (err.code === 4001) showError('Transaction rejected by user.');
+        else showError('Error: ' + (err.message || err));
+        btn.disabled = false;
+      }
+    }
+
+    window.addEventListener('load', function() {
+      if (!window.ethereum) showEl('no-wallet');
+    });
+
+    // Signal the local server when the user closes/navigates away so the pending
+    // action rejects immediately instead of waiting the full 5-minute timeout.
+    let _closed = false;
+    function sendCloseBeacon() {
+      if (_closed) return;
+      _closed = true;
+      try {
+        const body = JSON.stringify({ token: CONFIG.token, error: 'user_closed_tab' });
+        navigator.sendBeacon('/api/complete', new Blob([body], { type: 'application/json' }));
+      } catch (e) { /* best-effort */ }
+    }
+    window.addEventListener('pagehide', sendCloseBeacon);
+    window.addEventListener('beforeunload', sendCloseBeacon);
+
+    async function cancelFlow() {
+      if (_closed) return;
+      _closed = true;
+      try {
+        await fetch('/api/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: CONFIG.token, error: 'user_cancelled', cancelled: true }),
+        });
+      } catch (e) { /* best-effort */ }
+      hideAllMessages();
+      document.getElementById('success-text').textContent = 'Cancelled. You can close this tab.';
+      showEl('msg-success');
+      try { window.close(); } catch (e) { /* ignore */ }
+    }
+  </script>
+</body>
+</html>

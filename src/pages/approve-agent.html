@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Approve Agent - Boros MCP</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e4e4e7;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .container {
+      background: #1a1b23;
+      border: 1px solid #2e2f3a;
+      border-radius: 16px;
+      padding: 32px;
+      max-width: 480px;
+      width: 100%;
+      margin: 20px;
+    }
+    .logo {
+      font-size: 1.5em;
+      font-weight: 700;
+      margin-bottom: 4px;
+      color: #fff;
+    }
+    .subtitle {
+      color: #71717a;
+      font-size: 0.9em;
+      margin-bottom: 24px;
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 0;
+      border-bottom: 1px solid #2e2f3a;
+      font-size: 0.9em;
+    }
+    .info-row:last-of-type { border-bottom: none; }
+    .info-label { color: #a1a1aa; }
+    .info-value {
+      color: #e4e4e7;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.9em;
+      word-break: break-all;
+      max-width: 260px;
+      text-align: right;
+    }
+    .section {
+      background: #12131a;
+      border: 1px solid #2e2f3a;
+      border-radius: 10px;
+      padding: 16px;
+      margin: 16px 0;
+    }
+    .section-title {
+      font-size: 0.8em;
+      color: #71717a;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 12px;
+    }
+    .password-group { margin: 16px 0; }
+    .password-group label {
+      display: block;
+      font-size: 0.85em;
+      color: #a1a1aa;
+      margin-bottom: 6px;
+    }
+    .password-group input {
+      width: 100%;
+      padding: 10px 12px;
+      background: #12131a;
+      border: 1px solid #2e2f3a;
+      border-radius: 8px;
+      color: #e4e4e7;
+      font-size: 0.95em;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .password-group input:focus { border-color: #6366f1; }
+    .password-group .hint {
+      font-size: 0.78em;
+      color: #71717a;
+      margin-top: 4px;
+    }
+    .btn {
+      width: 100%;
+      padding: 12px;
+      border: none;
+      border-radius: 10px;
+      font-size: 1em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-top: 8px;
+    }
+    .btn-primary {
+      background: #6366f1;
+      color: #fff;
+    }
+    .btn-primary:hover:not(:disabled) { background: #4f46e5; }
+    .btn-primary:disabled {
+      background: #3f3f46;
+      color: #71717a;
+      cursor: not-allowed;
+    }
+    .btn-connect {
+      background: #2563eb;
+      color: #fff;
+    }
+    .btn-connect:hover { background: #1d4ed8; }
+    .btn-cancel {
+      background: transparent;
+      color: #a1a1aa;
+      border: 1px solid #2e2f3a;
+    }
+    .btn-cancel:hover:not(:disabled) {
+      background: #1a1b23;
+      color: #e4e4e7;
+      border-color: #3f3f46;
+    }
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 0.85em;
+      margin: 12px 0;
+    }
+    .status-bar.connected {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid rgba(34, 197, 94, 0.2);
+      color: #22c55e;
+    }
+    .status-bar.warning {
+      background: rgba(234, 179, 8, 0.1);
+      border: 1px solid rgba(234, 179, 8, 0.2);
+      color: #eab308;
+    }
+    .status-bar.error {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.2);
+      color: #ef4444;
+    }
+    .status-bar.success {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid rgba(34, 197, 94, 0.2);
+      color: #22c55e;
+    }
+    .status-bar.info {
+      background: rgba(99, 102, 241, 0.1);
+      border: 1px solid rgba(99, 102, 241, 0.2);
+      color: #a5b4fc;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.green { background: #22c55e; }
+    .dot.yellow { background: #eab308; }
+    .dot.red { background: #ef4444; }
+    .hidden { display: none; }
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid #71717a;
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .addr { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85em; }
+    .expiry-input-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #expiry-days {
+      width: 70px;
+      padding: 6px 8px;
+      background: #12131a;
+      border: 1px solid #2e2f3a;
+      border-radius: 6px;
+      color: #e4e4e7;
+      font-size: 1em;
+      font-family: inherit;
+      text-align: right;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    #expiry-days:focus { border-color: #6366f1; }
+    #expiry-days.invalid { border-color: #ef4444; }
+    #expiry-days::-webkit-outer-spin-button,
+    #expiry-days::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    #expiry-days { -moz-appearance: textfield; }
+    .expiry-unit { color: #a1a1aa; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">Boros MCP</div>
+    <div class="subtitle">Approve Trading Agent</div>
+
+    <!-- Step 1: Connect Wallet -->
+    <div id="step-connect">
+      <p style="color:#a1a1aa; font-size:0.9em; margin-bottom:16px;">
+        Connect your wallet to approve a trading agent that can execute trades on your behalf.
+        The agent cannot withdraw funds or transfer assets.
+      </p>
+      <button class="btn btn-connect" id="btn-connect" onclick="connectWallet()">
+        Connect Wallet
+      </button>
+      <div id="no-wallet" class="status-bar error hidden">
+        No wallet extension detected. Please install MetaMask or Rabby.
+      </div>
+    </div>
+
+    <!-- Step 2: Approve -->
+    <div id="step-approve" class="hidden">
+      <div id="wallet-status" class="status-bar connected">
+        <span class="dot green"></span>
+        <span>Connected: <span id="connected-address" class="addr"></span></span>
+      </div>
+
+      <div id="wrong-wallet" class="status-bar warning hidden">
+        <span class="dot yellow"></span>
+        <span>Please switch to wallet <span id="expected-address" class="addr"></span></span>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Agent Details</div>
+        <div class="info-row">
+          <span class="info-label">Agent Address</span>
+          <span class="info-value" id="agent-address"></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Expiry Duration</span>
+          <span class="info-value">
+            <span class="expiry-input-wrap">
+              <input type="number" id="expiry-days" min="1" max="365" step="1" oninput="onExpiryDaysChange()">
+              <span class="expiry-unit">days (1-365)</span>
+            </span>
+          </span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Expires On</span>
+          <span class="info-value" id="agent-expiry"></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Chain</span>
+          <span class="info-value">Arbitrum One</span>
+        </div>
+      </div>
+
+      <div class="password-group">
+        <label for="password">Password (optional)</label>
+        <input type="password" id="password" placeholder="Leave empty for no password">
+        <div class="hint">
+          If set, you will need to enter this password each time the MCP server starts.
+          The password encrypts the agent private key on disk.
+        </div>
+      </div>
+
+      <button class="btn btn-primary" id="btn-approve" onclick="approveAgent()">
+        Approve Agent
+      </button>
+      <button class="btn btn-cancel" id="btn-cancel" onclick="cancelFlow()">
+        Cancel
+      </button>
+    </div>
+
+    <!-- Status messages -->
+    <div id="msg-signing" class="status-bar info hidden">
+      <span class="spinner"></span>
+      <span>Please sign the approval message in your wallet...</span>
+    </div>
+    <div id="msg-relaying" class="status-bar info hidden">
+      <span class="spinner"></span>
+      <span>Relaying approval on-chain (gas paid by bot)...</span>
+    </div>
+    <div id="msg-saving" class="status-bar info hidden">
+      <span class="spinner"></span>
+      <span>Saving agent configuration...</span>
+    </div>
+    <div id="msg-success" class="status-bar success hidden">
+      <span id="success-text">Agent approved and saved. You can close this tab.</span>
+    </div>
+    <div id="msg-error" class="status-bar error hidden">
+      <span id="error-text"></span>
+    </div>
+  </div>
+
+  <script>
+    const CONFIG = {
+      routerAddress: '{{ROUTER_ADDRESS}}',
+      chainId: '{{CHAIN_ID}}',
+      rpcUrl: '{{RPC_URL}}',
+      token: '{{TOKEN}}',
+      agentAddress: '{{AGENT_ADDRESS}}',
+      port: '{{PORT}}',
+    };
+
+    const ARBITRUM_CHAIN_ID = '0x' + parseInt(CONFIG.chainId).toString(16);
+    const DEFAULT_EXPIRY_DAYS = parseInt('{{EXPIRY_DAYS}}') || 30;
+    let selectedExpiryDays = DEFAULT_EXPIRY_DAYS;
+
+    let connectedAddress = null;
+
+    function shortAddr(addr) {
+      if (!addr) return '';
+      return addr.slice(0, 6) + '...' + addr.slice(-4);
+    }
+
+    function showEl(id) { document.getElementById(id).classList.remove('hidden'); }
+    function hideEl(id) { document.getElementById(id).classList.add('hidden'); }
+
+    function updateExpiryDisplay() {
+      const expiryDate = new Date(Date.now() + selectedExpiryDays * 24 * 3600 * 1000);
+      document.getElementById('agent-expiry').textContent = expiryDate.toLocaleDateString() + ' (' + selectedExpiryDays + ' days)';
+    }
+
+    function onExpiryDaysChange() {
+      const input = document.getElementById('expiry-days');
+      const val = parseInt(input.value, 10);
+      const valid = Number.isFinite(val) && val >= 1 && val <= 365;
+      input.classList.toggle('invalid', !valid && input.value !== '');
+      document.getElementById('btn-approve').disabled = !valid;
+      if (valid) {
+        selectedExpiryDays = val;
+        updateExpiryDisplay();
+      } else {
+        document.getElementById('agent-expiry').textContent = '—';
+      }
+    }
+
+    function showError(msg) {
+      document.getElementById('error-text').textContent = msg;
+      showEl('msg-error');
+    }
+
+    function hideAllMessages() {
+      ['msg-signing', 'msg-relaying', 'msg-saving', 'msg-success', 'msg-error'].forEach(hideEl);
+    }
+
+    async function ensureArbitrumChain() {
+      const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+      if (chainId !== ARBITRUM_CHAIN_ID) {
+        try {
+          await window.ethereum.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: ARBITRUM_CHAIN_ID }],
+          });
+        } catch (switchErr) {
+          if (switchErr.code === 4902) {
+            await window.ethereum.request({
+              method: 'wallet_addEthereumChain',
+              params: [{
+                chainId: ARBITRUM_CHAIN_ID,
+                chainName: 'Arbitrum One',
+                nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+                rpcUrls: [CONFIG.rpcUrl],
+                blockExplorerUrls: ['https://arbiscan.io'],
+              }],
+            });
+          } else {
+            throw switchErr;
+          }
+        }
+      }
+    }
+
+    async function connectWallet() {
+      if (!window.ethereum) {
+        showEl('no-wallet');
+        return;
+      }
+
+      try {
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        if (!accounts || accounts.length === 0) {
+          showError('No accounts returned from wallet.');
+          return;
+        }
+
+        connectedAddress = accounts[0].toLowerCase();
+        await ensureArbitrumChain();
+
+        document.getElementById('connected-address').textContent = shortAddr(connectedAddress);
+
+        // Show agent details
+        document.getElementById('agent-address').textContent = shortAddr(CONFIG.agentAddress);
+        document.getElementById('expiry-days').value = String(DEFAULT_EXPIRY_DAYS);
+        selectedExpiryDays = DEFAULT_EXPIRY_DAYS;
+        updateExpiryDisplay();
+
+        hideEl('step-connect');
+        showEl('step-approve');
+
+        // Listen for account changes
+        window.ethereum.on('accountsChanged', function(accounts) {
+          if (accounts.length > 0) {
+            connectedAddress = accounts[0].toLowerCase();
+            document.getElementById('connected-address').textContent = shortAddr(connectedAddress);
+          }
+        });
+      } catch (err) {
+        showError('Failed to connect wallet: ' + (err.message || err));
+      }
+    }
+
+    async function approveAgent() {
+      hideAllMessages();
+      const btn = document.getElementById('btn-approve');
+      btn.disabled = true;
+
+      try {
+        await ensureArbitrumChain();
+
+        const expiryTimestamp = Math.floor(Date.now() / 1000) + selectedExpiryDays * 24 * 3600;
+        // Matches the Boros approveAgent EIP-712 message format — uint64-safe.
+        const nonce = (BigInt(Date.now()) * 1000n).toString();
+
+        const typedData = {
+          types: {
+            EIP712Domain: [
+              { name: 'name', type: 'string' },
+              { name: 'version', type: 'string' },
+              { name: 'chainId', type: 'uint256' },
+              { name: 'verifyingContract', type: 'address' },
+            ],
+            ApproveAgentMessage: [
+              { name: 'root', type: 'address' },
+              { name: 'accountId', type: 'uint8' },
+              { name: 'agent', type: 'address' },
+              { name: 'expiry', type: 'uint64' },
+              { name: 'nonce', type: 'uint64' },
+            ],
+          },
+          primaryType: 'ApproveAgentMessage',
+          domain: {
+            name: 'Pendle Boros Router',
+            version: '1.0',
+            chainId: parseInt(CONFIG.chainId),
+            verifyingContract: CONFIG.routerAddress,
+          },
+          message: {
+            root: connectedAddress,
+            accountId: 0,
+            agent: CONFIG.agentAddress,
+            expiry: expiryTimestamp.toString(),
+            nonce: nonce,
+          },
+        };
+
+        // 1. User wallet signs EIP-712 ApproveAgentMessage (no gas, no tx).
+        showEl('msg-signing');
+        const signature = await window.ethereum.request({
+          method: 'eth_signTypedData_v4',
+          params: [connectedAddress, JSON.stringify(typedData)],
+        });
+        hideEl('msg-signing');
+
+        // 2. Server encodes approveAgent(struct, sig) + relays via send-txs-bot (bot pays gas).
+        showEl('msg-relaying');
+        const password = document.getElementById('password').value;
+        const res = await fetch('/api/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: CONFIG.token,
+            signature,
+            rootAddress: connectedAddress,
+            expiry: expiryTimestamp,
+            nonce,
+            password,
+          }),
+        });
+
+        const result = await res.json();
+        hideEl('msg-relaying');
+
+        if (result.ok) {
+          showEl('msg-saving');
+          // Server already saved — this is just a brief UX beat before success.
+          setTimeout(() => {
+            hideEl('msg-saving');
+            showEl('msg-success');
+          }, 150);
+          btn.textContent = 'Done';
+        } else {
+          showError(result.error || 'Failed to relay agent approval.');
+          btn.disabled = false;
+        }
+      } catch (err) {
+        hideAllMessages();
+        if (err.code === 4001) {
+          showError('Signature rejected by user.');
+        } else {
+          showError('Error: ' + (err.message || err));
+        }
+        btn.disabled = false;
+      }
+    }
+
+    // Auto-detect wallet on load
+    window.addEventListener('load', function() {
+      if (!window.ethereum) {
+        showEl('no-wallet');
+      }
+    });
+
+    // Signal the local server when the user closes/navigates away so the pending
+    // action rejects immediately instead of waiting the full 5-minute timeout.
+    let _closed = false;
+    function sendCloseBeacon() {
+      if (_closed) return;
+      _closed = true;
+      try {
+        const body = JSON.stringify({ token: CONFIG.token, error: 'user_closed_tab' });
+        navigator.sendBeacon('/api/complete', new Blob([body], { type: 'application/json' }));
+      } catch (e) { /* best-effort */ }
+    }
+    window.addEventListener('pagehide', sendCloseBeacon);
+    window.addEventListener('beforeunload', sendCloseBeacon);
+
+    async function cancelFlow() {
+      if (_closed) return;
+      _closed = true;
+      try {
+        await fetch('/api/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: CONFIG.token, error: 'user_cancelled', cancelled: true }),
+        });
+      } catch (e) { /* best-effort */ }
+      hideAllMessages();
+      document.getElementById('success-text').textContent = 'Cancelled. You can close this tab.';
+      showEl('msg-success');
+      try { window.close(); } catch (e) { /* ignore */ }
+    }
+  </script>
+</body>
+</html>

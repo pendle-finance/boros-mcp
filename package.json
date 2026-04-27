@@ -1,0 +1,55 @@
+{
+  "name": "@pendle/boros-mcp",
+  "version": "0.1.0-beta.0",
+  "description": "MCP server for Boros — Pendle's interest rate derivatives trading platform",
+  "type": "module",
+  "bin": {
+    "boros-mcp": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc && cp -r src/pages dist/pages",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "boros",
+    "pendle",
+    "trading",
+    "interest-rate-swaps"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/pendle-finance/boros-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pendle-finance/boros-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pendle-finance/boros-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^4.21.0",
+    "open": "^10.1.0",
+    "viem": "^2.21.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
