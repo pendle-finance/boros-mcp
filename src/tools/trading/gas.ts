@@ -26,8 +26,8 @@ export function registerGasTools(server: McpServer) {
       description: 'Top up the off-chain gas budget by paying treasury for a specific market. DEDUCTED FROM YOUR MARGIN ACCOUNT (cross or isolated per marginMode) — this moves collateral into a non-withdrawable gas budget. Required before placing orders if gas balance is low.',
       inputSchema: {
         amount: z.number().positive('amount must be > 0').describe('Amount in USD to top up the off-chain gas budget (must be > 0)'),
-        marketId: marketIdField('Market ID whose treasury receives the payment (required — cannot be 0)'),
-        marginMode: marginModeField('Which account pays the fee. cross = per-token shared bucket; isolated = per-market subaccount.'),
+        marketId: marketIdField('Market treasury receives the payment.'),
+        marginMode: marginModeField('Which account pays the fee.'),
       },
     },
     withAuth(async ({ amount, marketId, marginMode }, { rootAddress }) => {

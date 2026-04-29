@@ -228,7 +228,15 @@
       </div>
       <div id="no-pending-notice" class="notice hidden" style="background:rgba(234,179,8,0.1);border-color:rgba(234,179,8,0.3);color:#eab308;">
         No pending withdrawal was detected for this token. Cancelling will be a no-op
-        on-chain — double-check before signing.
+        on-chain — you will still pay gas. If you JUST submitted a withdraw, the indexer
+        may not have caught up; wait ~15s and re-run cancel_withdraw without force:true
+        rather than confirming a likely no-op here.
+      </div>
+      <div id="no-pending-ack-row" class="hidden" style="margin:12px 0;display:flex;gap:8px;align-items:flex-start;">
+        <input type="checkbox" id="no-pending-ack" style="margin-top:4px;" onchange="onNoPendingAckChange()">
+        <label for="no-pending-ack" style="font-size:12px;color:#a1a1aa;line-height:1.45;cursor:pointer;">
+          I understand this may be a no-op and I will pay gas anyway. Submit the cancel transaction.
+        </label>
       </div>
 
       <div class="notice">
@@ -390,10 +398,19 @@
       return m + 'm';
     }
 
+    function onNoPendingAckChange() {
+      const ack = document.getElementById('no-pending-ack');
+      const btn = document.getElementById('btn-cancel');
+      btn.disabled = !ack.checked;
+    }
+
     function renderPending() {
       const p = txData && txData.pendingWithdrawal;
       if (!p) {
         showEl('no-pending-notice');
+        showEl('no-pending-ack-row');
+        // Hard-block sign until user explicitly acks the no-op risk.
+        document.getElementById('btn-cancel').disabled = true;
         return;
       }
       document.getElementById('pending-amount').textContent =
@@ -473,6 +490,9 @@
         const result = await res.json();
 
         if (result.ok) {
+          // Suppress the stale "no pending detected" warning once the cancel tx confirmed —
+          // the warning was based on a pre-flight indexer check that may have been lagged.
+          hideEl('no-pending-notice');
           document.getElementById('success-text').textContent =
             'Withdrawal cancelled! Tx: ' + shortAddr(txHash) + '. Funds remain in your account. You can close this tab.';
           showEl('msg-success');

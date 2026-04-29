@@ -21,7 +21,7 @@ export function registerEventsOnChainTools(server: McpServer): void {
         sourceAddress: addressFieldOptional('sourceAddress', 'Filter by source CONTRACT address (e.g. Router 0x8080808080daB95eFED788a9214e400ba552DEf6) — not a user wallet'),
         fromBlockNumber: z.number().int().min(0).optional().describe('Start block (inclusive)'),
         toBlockNumber: z.number().int().min(0).optional().describe('End block (inclusive)'),
-        limit: paginationLimitField({ max: 5000, defaultValue: 20 }),
+        limit: paginationLimitField({ max: 50, defaultValue: 20 }),
         resumeToken: resumeTokenField(),
       },
     },

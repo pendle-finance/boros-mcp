@@ -11,15 +11,14 @@ export function registerIncentivesMakerTools(server: McpServer): void {
     'get_maker_incentives',
     {
       annotations: { readOnlyHint: true },
-      description: 'Get maker incentive campaign data for a market: per-side (long/short) add-liquidity PENDLE rewards plus filled-volume epoch rewards. Boros currently rewards limit-order makers only; takers get nothing here. All rewards are paid in PENDLE (not the market\'s collateral token). Pass `maker` (your wallet) to populate currentEligibleShare and accumulatedReward; without it, those fields are 0. For prospective rewards on a draft order see simulate_order.makerIncentive.',
+      description: 'Get maker incentive campaign data for a market: per-side (long/short) add-liquidity PENDLE rewards plus filled-volume epoch rewards. Boros currently rewards limit-order makers only; takers get nothing here. All rewards are paid in PENDLE (not the market\'s collateral token). Pass `maker` (your wallet) to populate currentEligibleShare and accumulatedReward; without it, those fields are 0. For prospective rewards on a draft order see place_order(mode:"simulate").makerIncentive.',
       inputSchema: {
-        marketId: marketIdField('Market ID (0..2^24-1)', { min: 0, max: 0xFFFFFF }),
+        marketId: marketIdField(),
         maker: addressFieldOptional('maker', 'Maker wallet address (optional)'),
       },
     },
     async ({ marketId, maker }) => {
       try {
-        // CROSS_MARKET_ID sentinel — backend silently returns all-zero rather than 404, so guard here.
         if (marketId === 0xFFFFFF) {
           return errorContent(
             BorosErrorCode.INVALID_PARAMS,

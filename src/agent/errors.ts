@@ -59,10 +59,10 @@ const ERROR_ACTIONS: Record<BorosErrorCode, string> = {
   [BorosErrorCode.SLIPPAGE_EXCEEDED]: 'Price moved beyond slippage tolerance. Increase slippage or try again.',
   [BorosErrorCode.MIN_ORDER_VALUE]: 'Order notional below the market minimum (typically $10). Increase size.',
   [BorosErrorCode.AMM_MIN_CASH]: 'Cash deposit is below the AMM min-cash floor (MMInsufficientMinCash). Increase humanCash/cashAmount and retry.',
-  [BorosErrorCode.MARKET_PAUSED]: 'Market is in close-only mode. You can only close existing positions, not open new ones.',
+  [BorosErrorCode.MARKET_PAUSED]: 'Market is paused (status=PAUSED). No trading is allowed — neither opening nor closing positions.',
   [BorosErrorCode.MARKET_HALTED]: 'Market is halted. No operations allowed.',
   [BorosErrorCode.SIMULATION_FAILED]: 'Order simulation failed. Adjust parameters and retry.',
-  [BorosErrorCode.PRICE_IMPACT_TOO_HIGH]: 'Price impact is too high. Reduce order size, use limit orders, or raise the `slippage` param on simulate_order/place_order (decimal, 0.05 = 5%).',
+  [BorosErrorCode.PRICE_IMPACT_TOO_HIGH]: 'Price impact is too high. Reduce order size, use limit orders, or raise the `slippage` param on place_order (decimal, 0.05 = 5%).',
   [BorosErrorCode.EXECUTION_REVERTED]: 'On-chain execution reverted. See `execution` array for per-call revert reasons; no state was changed for reverted calls.',
   [BorosErrorCode.NO_FILL]: 'Order did not fill. IOC/FOK with no matching liquidity at the given rate. Widen the rate guard or switch to GTC.',
   [BorosErrorCode.BROWSER_DISMISSED]: 'User closed the browser tab before completing the transaction. Re-run the tool to reopen the signing page.',
@@ -126,6 +126,42 @@ const REVERT_RE = /\b([A-Z][A-Za-z0-9_]*)\(\)/;
 
 // Strips viem's `Unrecognized custom error: 0x...\nDocs:...\nVersion:...` preamble; keeps selector for debugging.
 const VIEM_UNRECOGNIZED_RE = /Unrecognized custom error:\s*(0x[0-9a-fA-F]{8})[\s\S]*$/;
+
+const KNOWN_ERROR_SELECTORS: Record<string, { name: string; hint: string }> = {
+  // BOROS20 token: not enough balance (e.g. burning more LP than you hold)
+  '0x7ec2996b': {
+    name: 'BOROS20NotEnoughBalance',
+    hint: 'BOROS20 token has insufficient balance for this op (e.g. trying to burn more LP than you own, or move more cash than the market account holds). Check get_vault_info userAddress / get_collateral before retrying.',
+  },
+  // AMM math
+  '0x75407949': { name: 'AMMTotalSupplyCapExceeded', hint: 'AMM is at supply cap; cannot accept more liquidity. Check get_vault_info.fillPercent.' },
+  '0x355d5054': { name: 'AMMInsufficientLpOut', hint: 'minLpOut not met — slippage exceeded. Lower minLpOut or wait for less volatile pool state.' },
+  '0x5fa59d5a': { name: 'AMMInsufficientCashOut', hint: 'minCashOut not met — slippage exceeded on burn. Lower minCashOut or wait.' },
+  '0x7e969789': { name: 'AMMInsufficientSizeOut', hint: 'AMM swap output below minimum acceptable size.' },
+  '0xd60bb2a4': { name: 'AMMInsufficientLiquidity', hint: 'AMM lacks liquidity for the requested swap. Try a smaller size or use the orderbook (get_orderbook).' },
+  // Margin / cash
+  '0x7b51530e': { name: 'MMInsufficientIM', hint: 'Insufficient initial margin. Reduce size or deposit more collateral.' },
+  '0x428dfdd6': { name: 'MMInsufficientMinCash', hint: 'Cash deposit is below the AMM min-cash floor. Increase humanCash/cashAmount and retry.' },
+  // Order lifecycle
+  '0xc26803d5': { name: 'MarketOrderNotFound', hint: 'Order id is unknown to the market — already filled, cancelled, or never existed.' },
+  '0x7f458441': { name: 'MarketOrderALOFilled', hint: 'ALO (post-only) order would have crossed the book and filled. ALO requires the order to rest 100%; use SOFT_ALO if partial-skip is acceptable.' },
+  '0x12c85f5e': { name: 'MarketOrderFOKNotFilled', hint: 'FOK order could not be filled atomically. Use IOC for partial fills, or widen size/rate.' },
+  '0xee2210bb': { name: 'MarketMaxOrdersExceeded', hint: 'You have hit the per-market open-order cap. Cancel some via cancel_orders before placing more.' },
+  '0x031eed50': { name: 'MarketOICapExceeded', hint: 'Open-interest cap reached for this market.' },
+  '0x68c19c04': { name: 'MarketOrderRateOutOfBound', hint: 'limitTick / rate is outside the market\'s allowed band. Check tickStep + rate bounds via get_amm_info.' },
+  '0x5f2a407b': { name: 'MarketMatured', hint: 'Market has matured; trading is no longer allowed.' },
+  '0x54882d18': { name: 'MarketPaused', hint: 'Market is currently paused.' },
+  // Markets & accounts
+  '0x6939f0eb': { name: 'MMMarketAlreadyEntered', hint: 'You have already entered this market on this cross account.' },
+  '0x1eb2248e': { name: 'MMMarketExitDenied', hint: 'Cannot exit market — contract requires zero position size AND zero open limit orders. Close positions and cancel orders first.' },
+  '0x128bdbaa': { name: 'MMMarketNotEntered', hint: 'Cross account has not entered this market. Call enter_exit_markets({action:"enter"}) first.' },
+  '0xa5c0c728': { name: 'AMMNotFound', hint: 'No AMM is configured for this market — use the orderbook instead.' },
+  '0xc32bc493': { name: 'AMMCutOffReached', hint: 'AMM has reached its cutoff time; no further deposits or swaps are accepted.' },
+  // Auth
+  '0x22d595f9': { name: 'AuthAgentExpired', hint: 'Agent approval has expired. Run setup_agent again.' },
+  '0xbaa2409f': { name: 'AuthSelectorNotAllowed', hint: 'Agent is not authorised for this Router selector. The MCP-issued agent only signs the 12-selector trade allowlist; some Router functions require the root EOA.' },
+  '0x231cc7ca': { name: 'AuthInvalidAgent', hint: 'Agent address does not match the expected agent for this root. Re-run setup_agent.' },
+};
 // open-api / send-txs-bot Object.assign upstream NestJS body onto err, so Error.message can be array (validation) or object.
 export function sanitizeErrorMessage(message: unknown): string {
   if (message == null) return '';
@@ -139,6 +175,11 @@ export function sanitizeErrorMessage(message: unknown): string {
   if (!message) return message;
   const m = message.match(VIEM_UNRECOGNIZED_RE);
   if (m) {
+    const sel = m[1].toLowerCase();
+    const known = KNOWN_ERROR_SELECTORS[sel];
+    if (known) {
+      return `On-chain call reverted: ${known.name} (selector ${sel}). ${known.hint}`;
+    }
     return `On-chain call reverted with an undecoded custom error (selector ${m[1]}). Likely cause: invalid amount/state for this operation (e.g. LP balance below minimum, AMM out of bounds, supply cap, or rate guard). Adjust inputs and retry; if persistent, report the selector to support.`;
   }
   return message;

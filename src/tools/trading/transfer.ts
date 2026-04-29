@@ -9,7 +9,7 @@ import {
   enrichAmount,
   resolveAmount,
 } from '../../utils.js';
-import { catchToErrorContent, BorosErrorCode } from '../../agent/errors.js';
+import { catchToErrorContent, errorContent, BorosErrorCode } from '../../agent/errors.js';
 import { tryBigInt } from './_helpers.js';
 import { getMarketInfo } from './_market.js';
 import {
@@ -21,19 +21,22 @@ import {
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { withAuth } from '../_with-auth.js';
 import { getAssetInfo } from '../../api/asset-cache.js';
+import { marketIdField } from '../_schemas.js';
 
 export function registerTransferTools(server: McpServer) {
   server.registerTool(
-    'simulate_cash_transfer',
+    'cash_transfer',
     {
-      annotations: { readOnlyHint: true },
-      description: `Preview a collateral transfer between cross-margin and an isolated market account, WITHOUT executing. Mirrors the simulate_order → place_order two-step pattern.
+      annotations: { destructiveHint: true },
+      description: `INTERNAL margin move between your own cross and isolated buckets on Boros. NOT an ERC-20 transfer — there is no recipient address. To move funds out of Boros use \`withdraw\`; to deposit fresh tokens use \`deposit\`; to top up gas budget use \`pay_gas\`.
 
-WORKFLOW:
-1. Call this to get the pre/post margin state for each side.
-2. If the user confirms, call cash_transfer with the same params to execute.`,
+Default mode is 'simulate' — ALWAYS run mode:'simulate' first to preview pre/post margin state, show the user, then ONLY call mode:'execute' AFTER confirmation. Execute requires gas budget; top up via pay_gas if needed.`,
       inputSchema: {
-        marketId: z.number().describe('Market ID for the isolated account'),
+        mode: z
+          .enum(['simulate', 'execute'])
+          .default('simulate')
+          .describe('"simulate" (default): preview pre/post margin state. "execute": sign and submit via the agent key. ALWAYS simulate first.'),
+        marketId: marketIdField('Isolated account.'),
         direction: z
           .enum(['cross_to_isolated', 'isolated_to_cross'])
           .describe('Transfer direction'),
@@ -41,7 +44,7 @@ WORKFLOW:
         humanAmount: z.number().optional().describe('Human-readable amount to transfer (e.g. 100.5)'),
       },
     },
-    withAuth(async ({ marketId, direction, amount, humanAmount }, { rootAddress }) => {
+    withAuth(async ({ mode, marketId, direction, amount, humanAmount }, { rootAddress }) => {
       try {
         const accountId = DEFAULT_ACCOUNT_ID;
 
@@ -57,7 +60,69 @@ WORKFLOW:
 
         const directionStr = direction === 'cross_to_isolated' ? 'CROSS_TO_ISOLATED' : 'ISOLATED_TO_CROSS';
 
-        const sim = await fetchWithRetry(() =>
+        if (mode === 'simulate') {
+          const sim = await fetchWithRetry(() =>
+            openApiPost('/v1/simulations/cash-transfer', {
+              root: rootAddress,
+              accountId,
+              marketId,
+              direction: directionStr,
+              amount: transferAmount,
+            }),
+          );
+
+          // Pre-flight overdraft check — backend sim happily diffs balances even when the user
+          // doesn't have the funds, so the failure only surfaces at execute. Compare in 18-dec
+          // internal cash units (sim's pre is netBalance in 18-dec; transferAmount is native).
+          try {
+            const sourceLeg =
+              direction === 'cross_to_isolated' ? sim?.crossAccState : sim?.isolatedAccState;
+            const preBalanceRaw = sourceLeg?.preUserState?.collateralBalance;
+            if (preBalanceRaw !== undefined && preBalanceRaw !== null) {
+              const preBalance18 = BigInt(preBalanceRaw);
+              const scaleExp = 18 - decimals;
+              const requested18 =
+                scaleExp >= 0
+                  ? BigInt(transferAmount) * 10n ** BigInt(scaleExp)
+                  : BigInt(transferAmount) / 10n ** BigInt(-scaleExp);
+              if (requested18 > preBalance18) {
+                const humanReq = enrichAmount(transferAmount, decimals, assetSymbol).humanAmount;
+                const humanPre = (Number(preBalance18) / 1e18).toFixed(decimals);
+                return errorContent(
+                  BorosErrorCode.INVALID_PARAMS,
+                  `Insufficient ${direction === 'cross_to_isolated' ? 'cross' : 'isolated'} balance: requested ${humanReq} ${assetSymbol}, available ~${humanPre} ${assetSymbol}.`,
+                );
+              }
+            }
+          } catch { /* best-effort — fall through to backend sim semantics */ }
+
+          return jsonResult({
+            ok: true,
+            mode: 'simulate',
+            action: 'cash_transfer',
+            marketId,
+            ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
+            marketSymbol,
+            direction,
+            humanAmount: enrichAmount(transferAmount, decimals, assetSymbol).humanAmount,
+            symbol: assetSymbol,
+            simulation: sim,
+            nextTool: {
+              tool: 'cash_transfer',
+              params: {
+                mode: 'execute',
+                marketId,
+                direction,
+                ...(amount !== undefined ? { amount } : {}),
+                ...(humanAmount !== undefined ? { humanAmount } : {}),
+              },
+              instruction: 'If the user confirms, call cash_transfer with mode:"execute" and the same params to submit.',
+            },
+          });
+        }
+
+        // mode === 'execute' — pre-flight sim, abort before signing if it fails.
+        await fetchWithRetry(() =>
           openApiPost('/v1/simulations/cash-transfer', {
             root: rootAddress,
             accountId,
@@ -66,63 +131,6 @@ WORKFLOW:
             amount: transferAmount,
           }),
         );
-
-        return jsonResult({
-          ok: true,
-          action: 'simulate_cash_transfer',
-          marketId,
-          ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
-          marketSymbol,
-          direction,
-          humanAmount: enrichAmount(transferAmount, decimals, assetSymbol).humanAmount,
-          symbol: assetSymbol,
-          simulation: sim,
-          nextTool: {
-            tool: 'cash_transfer',
-            params: {
-              marketId,
-              direction,
-              ...(amount !== undefined ? { amount } : {}),
-              ...(humanAmount !== undefined ? { humanAmount } : {}),
-            },
-            instruction: 'If the user confirms the simulation, call cash_transfer with these params to execute.',
-          },
-        });
-      } catch (err) {
-        return catchToErrorContent(err);
-      }
-    }),
-  );
-
-  server.registerTool(
-    'cash_transfer',
-    {
-      annotations: { destructiveHint: true },
-      description: 'INTERNAL margin move between your own cross and isolated buckets on Boros. NOT an ERC-20 transfer — there is no recipient address. To move funds out of Boros use `withdraw`; to deposit fresh tokens use `deposit`; to top up gas budget use `pay_gas`. Call simulate_cash_transfer FIRST and show the preview; only call this after the user confirms. Requires gas budget (top up via pay_gas if needed).',
-      inputSchema: {
-        marketId: z.number().describe('Market ID for the isolated account'),
-        direction: z
-          .enum(['cross_to_isolated', 'isolated_to_cross'])
-          .describe('Transfer direction'),
-        amount: z.string().optional().describe('Raw token amount to transfer'),
-        humanAmount: z.number().optional().describe('Human-readable amount to transfer (e.g. 100.5)'),
-      },
-    },
-    withAuth(async ({ marketId, direction, amount, humanAmount }, { rootAddress }) => {
-      try {
-        const accountId = DEFAULT_ACCOUNT_ID;
-
-        const market = await getMarketInfo(marketId);
-        const tokenId: number = market.tokenId;
-        const marketNameRaw: string | undefined = market.imData?.name;
-        const marketSymbol: string | undefined = market.metadata?.underlyingSymbol;
-
-        const asset = await getAssetInfo(tokenId);
-        const decimals = asset.decimals;
-        const assetSymbol: string = asset.symbol;
-        const transferAmount = resolveAmount(amount, humanAmount, decimals);
-
-        const directionStr = direction === 'cross_to_isolated' ? 'CROSS_TO_ISOLATED' : 'ISOLATED_TO_CROSS';
 
         const calldataRes = await fetchWithRetry(() =>
           openApiPost('/v1/calldata-builder/agent/cash-transfer', {
@@ -135,7 +143,6 @@ WORKFLOW:
         const calldatas = extractCalldatas(calldataRes);
 
         // signedAmount: + for CROSS→ISOLATED, − for ISOLATED→CROSS (CashTransferReq int256).
-        // Pin exact amount (no slippage).
         const transferAmountBig = tryBigInt(transferAmount);
         const cashTransferIntent: IntentExpectation = {
           selector: ROUTER_SELECTORS.cashTransfer,
@@ -165,6 +172,7 @@ WORKFLOW:
 
         return jsonResult({
           ok: true,
+          mode: 'execute',
           action: 'cash_transfer',
           ...(txHash ? { txHash } : {}),
           marketId,
@@ -177,11 +185,10 @@ WORKFLOW:
       } catch (err) {
         return catchToErrorContent(err, {
           nextToolFor: {
-            // Default cross (most common); user overrides on retry.
             [BorosErrorCode.INSUFFICIENT_GAS]: {
               name: 'pay_gas',
               args: { marketId, marginMode: 'cross', amount: 1 },
-              why: 'Off-chain gas budget exhausted. Top up first, then re-run cash_transfer with the same params. `amount` is USD.',
+              why: 'Off-chain gas budget exhausted. Top up first, then re-run cash_transfer with mode:"execute". `amount` is USD.',
             },
           },
         });

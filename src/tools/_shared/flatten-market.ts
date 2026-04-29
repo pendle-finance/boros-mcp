@@ -1,9 +1,5 @@
 import { formatDuration } from '../../utils.js';
 
-export interface FlattenMarketOptions {
-  full?: boolean;
-}
-
 export type FlattenedMarket = Record<string, unknown>;
 
 // /v1/markets ships status as a numeric MarketStatus enum where ordering is anti-intuitive
@@ -25,16 +21,55 @@ export function roundApr(v: unknown): number | undefined {
   return Number(v.toFixed(6));
 }
 
-export function flattenMarket(
-  m: unknown,
-  opts: FlattenMarketOptions = {},
-): FlattenedMarket {
+export const FLATTEN_MARKET_DEFAULT_FIELDS = [
+  'marketId',
+  'name',
+  'symbol',
+  'status',
+  'maturity',
+  'maturityIso',
+  'isMatured',
+  'underlyingSymbol',
+  'markApr',
+  'volume24h',
+] as const;
+
+export const FLATTEN_MARKET_OPTIONAL_FIELDS = [
+  'address',
+  'tokenId',
+  'fundingRateSymbol',
+  'ammId',
+  'lastTradedApr',
+  'midApr',
+  'bestBid',
+  'bestAsk',
+  'ammImpliedApr',
+  'floatingApr',
+  'longYieldApr',
+  'notionalOI',
+  'nextSettlementTime',
+  'nextSettlementIso',
+  'timeToMaturity',
+  'timeToMaturityLabel',
+  'assetMarkPrice',
+  'softOICap',
+  'imData',
+  'config',
+  'metadata',
+  'extConfig',
+  'data',
+  'state',
+] as const;
+
+export function flattenMarket(m: unknown): FlattenedMarket {
   const raw = m as Record<string, unknown>;
   const imData = (raw.imData ?? {}) as Record<string, unknown>;
   const config = (raw.config ?? {}) as Record<string, unknown>;
   const metadata = (raw.metadata ?? {}) as Record<string, unknown>;
   const data = (raw.data ?? {}) as Record<string, unknown>;
   const state = (raw.state ?? {}) as Record<string, unknown>;
+  // v2 puts ammId on extConfig; older snapshots used metadata.ammId — read both.
+  const extConfig = (raw.extConfig ?? {}) as Record<string, unknown>;
 
   const maturity = imData.maturity as number | undefined;
   const nextSettlement = data.nextSettlementTime as number | undefined;
@@ -42,21 +77,22 @@ export function flattenMarket(
   // imData.name is the full label (e.g. "Hyperliquid ETH 26 Jun 2026"); imData.marketName is legacy.
   const name = (imData.name as string | undefined) ?? (imData.marketName as string | undefined);
   const symbol = imData.symbol as string | undefined;
-
-  // v2 puts ammId on extConfig; older snapshots used metadata.ammId — read both.
-  const extConfig = (raw.extConfig ?? {}) as Record<string, unknown>;
   const resolvedAmmId =
     (extConfig.ammId as number | undefined) ?? (metadata.ammId as number | undefined);
 
-  const base: Record<string, unknown> = {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const isMatured = typeof maturity === 'number' ? maturity <= nowSec : false;
+
+  return {
     marketId: raw.marketId,
     address: raw.address,
     tokenId: raw.tokenId,
     status: statusLabel(config.status),
-    ...(name ? { name } : {}),
-    ...(symbol ? { symbol } : {}),
+    name,
+    symbol,
     maturity,
-    ...(maturity ? { maturityIso: new Date(maturity * 1000).toISOString() } : {}),
+    maturityIso: maturity ? new Date(maturity * 1000).toISOString() : undefined,
+    isMatured,
     underlyingSymbol: metadata.underlyingSymbol,
     fundingRateSymbol: metadata.fundingRateSymbol,
     ammId: resolvedAmmId,
@@ -71,21 +107,18 @@ export function flattenMarket(
     volume24h: data.volume24h,
     notionalOI: data.notionalOI,
     nextSettlementTime: nextSettlement,
-    ...(nextSettlement ? { nextSettlementIso: new Date(nextSettlement * 1000).toISOString() } : {}),
+    nextSettlementIso: nextSettlement ? new Date(nextSettlement * 1000).toISOString() : undefined,
     timeToMaturity: ttm,
-    ...(ttm ? { timeToMaturityLabel: formatDuration(ttm) } : {}),
+    timeToMaturityLabel: ttm ? formatDuration(ttm) : undefined,
     assetMarkPrice: data.assetMarkPrice,
     softOICap: config.softOICap,
-  };
-  // full=true: surface extra blocks. Omit `state` when missing (v2 list-item DTO has no state).
-  if (opts.full) {
-    base.imData = imData;
+    imData,
     // Mirror the numeric→label status translation onto config so consumers don't see disagreeing values.
-    base.config = { ...config, status: statusLabel(config.status) };
-    base.metadata = metadata;
-    base.extConfig = extConfig;
-    base.data = data;
-    if (raw.state !== undefined) base.state = state;
-  }
-  return base;
+    config: { ...config, status: statusLabel(config.status) },
+    metadata,
+    extConfig,
+    data,
+    // v2 list-item DTO has no state — drop the empty placeholder so projection sees undefined.
+    state: raw.state !== undefined ? state : undefined,
+  };
 }

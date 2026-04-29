@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { openApiGet, openApiPost } from '../../api/open-api.js';
 import { jsonResult, formatX18, decodeMarketAcc, sumBigInts } from '../../utils.js';
-import { userAddressField } from '../_schemas.js';
+import { userAddressField, accountIdField } from '../_schemas.js';
 import { catchToErrorContent } from '../../agent/errors.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { safeAssetMap } from '../../api/asset-cache.js';
@@ -12,10 +12,10 @@ export function registerPortfolioSummaryTools(server: McpServer): void {
     'get_portfolio_summary',
     {
       annotations: { readOnlyHint: true },
-      description: 'Aggregate portfolio snapshot for an account: per-collateral-token totals (collateral, equity, initial/available margin), open-position count, open-order count, margin utilization, and optionally unrealized PnL. Single read-only call that replaces fan-out over get_collateral + get_positions + get_pnl_by_market + get_limit_orders. Use summaryByToken when summary.isCrossCollateral is true (positions in >1 token, e.g. WETH and USDT). Pass includePnl:true only when needed — it issues one extra request per (marketAcc, marketId) pair. Does NOT include the gas wallet (use get_gas_balance).',
+      description: 'Aggregate portfolio snapshot for an account: per-collateral-token totals (collateral, equity, initial/available margin), open-position count, open-order count, margin utilization, and optionally unrealized PnL. Single read-only call that replaces fan-out over get_collateral + get_positions + get_pnl_by_market + get_limit_orders. Use summaryByToken when summary.isCrossCollateral is true (positions in >1 token, e.g. WETH and USDT). Pass includePnl:true only when needed — it issues one extra request per (marketAcc, marketId) pair. Does NOT include the gas wallet (use get_gas_info).',
       inputSchema: {
         userAddress: userAddressField(),
-        accountId: z.number().int().default(0).describe('Account ID (default 0 for main account)'),
+        accountId: accountIdField('Default 0 for main account.'),
         includePnl: z.boolean().default(false).describe('If true, fetch per-(marketAcc,marketId) unrealized PnL (adds N parallel calls). Default false to keep the summary fast.'),
       },
     },
@@ -174,8 +174,8 @@ export function registerPortfolioSummaryTools(server: McpServer): void {
             summary: 'Cross-collateral sums of 18-dec FixedX18 raw values. Only meaningful when summary.isCrossCollateral is false (single collateral token). When true, READ summaryByToken — adding e.g. WETH + USDT amounts is not meaningful.',
             summaryByToken: 'Per-collateral-token aggregation (keyed by token symbol). Use this whenever the account holds positions in more than one collateral.',
             marginUtilizationPct: 'initialMargin / netBalance expressed as percent (0–100+). null when netBalance <= 0. Computed across all marketAccs combined; meaningful only for single-collateral accounts.',
-            openOrderCount: `Open limit orders across all markets. Based on a single page query (limit=${ORDER_PAGE_LIMIT}); when openOrderCountIsLowerBound is true, paginate get_all_limit_orders for the exact count.`,
-            gasWalletNote: 'Does NOT include the gas wallet (ETH for tx fees) — use get_gas_balance.',
+            openOrderCount: `Open limit orders across all markets. Based on a single page query (limit=${ORDER_PAGE_LIMIT}); when openOrderCountIsLowerBound is true, paginate get_limit_orders with sort:"placed" for the exact count.`,
+            gasWalletNote: 'Does NOT include the gas wallet (ETH for tx fees) — use get_gas_info.',
             ...(includePnl
               ? { unrealizedPnl: 'Sum of unrealisedPnl across each active (marketAcc, marketId). Sourced from /v1/accounts/active-positions — no extra requests.' }
               : { note: 'Call with includePnl:true to include aggregated unrealized PnL (no extra cost in V2 — read straight off active-positions).' }),

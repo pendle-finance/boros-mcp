@@ -1,29 +1,85 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { CHAIN_ID } from '../../config.js';
-import { jsonResult, formatDuration } from '../../utils.js';
+import { jsonResult, enrichTimestamp, formatDuration } from '../../utils.js';
 import { catchToErrorContent } from '../../agent/errors.js';
 import {
-  isAgentReady, getAgentMeta, isAgentLocked,
+  isAgentReady, getAgentMeta, isAgentLocked, isAgentPasswordProtected,
 } from '../../agent/agent-manager.js';
 import { openApiGet } from '../../api/open-api.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
+import {
+  userAddressFieldOptional,
+  addressFieldOptional,
+  accountIdField,
+} from '../_schemas.js';
 
 export function registerAgentStatusTool(server: McpServer) {
   server.registerTool(
     'agent_status',
     {
       annotations: { readOnlyHint: true },
-      description: 'Check the local MCP agent\'s status. Returns `configured`, `locked`, `ready`, `agentAddress`, `rootAddress`, `accountId` (always 0 for the MCP), `chainId` (42161), `expiryDate`, `isExpired`, `daysRemaining`, `secondsRemaining`, `humanRemaining`, `createdAt`, plus on-chain reconciliation against the Boros Router (`GET /v1/agents/expiry-time`). Sets `onChainExpiryMismatch=true` if the local meta and the on-chain `agentExpiry` storage diverge — e.g. the user revoked the approval from the dapp or another wallet (in which case any trade would fail at signing time). For inspecting OTHER agents (third-party bots) or non-zero accountIds, use get_agent_expiry instead.',
-      inputSchema: {},
-    },
-    async () => {
-      try {
-        const meta = getAgentMeta();
+      description: `Check agent approval status. Two modes:
 
-        // `configured` reflects on-disk presence regardless of unlock state — keeps this in
-        // sync with setup_agent's refusal path which also reads meta directly.
+LOCAL MODE (no args, or only \`accountId\`): inspect THIS MCP install's configured agent. Returns \`configured\`, \`locked\`, \`ready\`, \`passwordProtected\` (false → on-disk key is encrypted with empty password and will auto-decrypt on every MCP startup; surfaces a \`securityWarning\`), \`agentAddress\`, \`rootAddress\`, \`accountId\` (always 0 for the MCP), \`chainId\` (42161), \`expiryDate\`, \`isExpired\`, \`daysRemaining\`, \`secondsRemaining\`, \`humanRemaining\`, \`createdAt\`, plus on-chain reconciliation against the Boros Router (\`GET /v1/agents/expiry-time\`). Sets \`onChainExpiryMismatch=true\` if local meta and on-chain \`agentExpiry\` storage diverge — e.g. user revoked the approval externally (any trade would fail at signing time).
+
+LOOKUP MODE (\`agentAddress\` + \`userAddress\` set): read the on-chain agent-approval expiry for any (userAddress, accountId, agent) triple. Public/read-only, does NOT require setup_agent. \`expiryTime=0\` means the agent is NOT currently approved (covers never-approved AND previously-revoked — the contract \`delete\`s the slot on revoke).`,
+      inputSchema: {
+        agentAddress: addressFieldOptional(
+          'agentAddress',
+          'Agent wallet address to look up. Set this (with userAddress) to switch to LOOKUP MODE for a third-party agent.',
+        ),
+        userAddress: userAddressFieldOptional(
+          'Required when agentAddress is set (LOOKUP MODE).',
+        ),
+        accountId: accountIdField('LOCAL MODE: ignored (MCP always uses 0). LOOKUP MODE: queries that triple.'),
+      },
+    },
+    async ({ agentAddress, userAddress, accountId }) => {
+      try {
+        // LOOKUP MODE — third-party agent expiry lookup, no local-agent semantics.
+        if (agentAddress && userAddress) {
+          const res = await fetchWithRetry(() =>
+            openApiGet('/v1/agents/expiry-time', {
+              root: userAddress,
+              accountId: accountId ?? 0,
+              agentAddress,
+            }),
+          );
+          const expiryTime = res.expiryTime ?? 0;
+          const now = Math.floor(Date.now() / 1000);
+          const isApproved = expiryTime > now;
+          const secondsRemaining = isApproved ? expiryTime - now : 0;
+          const daysRemaining = isApproved ? Math.floor(secondsRemaining / 86400) : 0;
+          const expiringSoon = isApproved && secondsRemaining <= 7 * 86400;
+          return jsonResult({
+            mode: 'lookup',
+            userAddress,
+            accountId: accountId ?? 0,
+            agentAddress,
+            expiryTime,
+            ...(expiryTime > 0 ? { expiry: enrichTimestamp(expiryTime) } : {}),
+            isApproved,
+            secondsRemaining,
+            daysRemaining,
+            ...(isApproved ? { remaining: formatDuration(secondsRemaining) } : {}),
+            ...(expiringSoon ? { warning: `Approval expires in ${formatDuration(secondsRemaining)}; consider re-approving via setup_agent.` } : {}),
+            _context: {
+              expiryTime: 'Unix seconds when on-chain approval expires. 0 means not currently approved (never-approved or revoked — both clear the slot).',
+              isApproved: 'expiryTime > nowSeconds, computed against the MCP host clock.',
+            },
+          });
+        }
+        if (agentAddress && !userAddress) {
+          return jsonResult({
+            error: 'agentAddress requires userAddress for LOOKUP MODE. Omit both for LOCAL MODE.',
+          });
+        }
+
+        // LOCAL MODE
+        const meta = getAgentMeta();
         if (!meta) {
           return jsonResult({
+            mode: 'local',
             configured: false,
             chainId: Number(CHAIN_ID),
             message: 'No agent configured. Call setup_agent to connect your wallet.',
@@ -33,15 +89,13 @@ export function registerAgentStatusTool(server: McpServer) {
 
         const ready = isAgentReady();
         const locked = isAgentLocked();
+        const passwordProtected = isAgentPasswordProtected();
         const now = Date.now() / 1000;
         const isExpired = now > meta.expiryTimestamp;
-        // floor matches agent-manager.ts:200 — avoids over-reporting by a day when expiry is < 1 day away.
         const secondsRemaining = Math.max(0, Math.floor(meta.expiryTimestamp - now));
         const daysRemaining = Math.floor(secondsRemaining / 86400);
         const expiryDate = new Date(meta.expiryTimestamp * 1000).toISOString();
 
-        // Reconcile on-chain BEFORE the locked-branch early-return so password-locked agents
-        // still surface external revocations. Probe is unauthenticated.
         let onChainExpiryTime: number | undefined;
         let onChainExpiryIso: string | undefined;
         let onChainApproved: boolean | undefined;
@@ -60,19 +114,16 @@ export function registerAgentStatusTool(server: McpServer) {
           if (onChainExpiryTime > 0) {
             onChainExpiryIso = new Date(onChainExpiryTime * 1000).toISOString();
           }
-          // Mismatch: local claims valid but chain says no, OR expiries diverge >60s (genuine clock
-          // skew is sub-second).
           if (!isExpired && (!onChainApproved || Math.abs(onChainExpiryTime - meta.expiryTimestamp) > 60)) {
             onChainExpiryMismatch = true;
           }
         } catch (err) {
-          // Truncate to avoid leaking verbose backend HTML/error pages into the response.
           const raw = err instanceof Error ? err.message : String(err);
           onChainCheckError = raw.length > 240 ? raw.slice(0, 240) + '…' : raw;
         }
 
-        // Stable shape across every branch.
         const baseFields = {
+          mode: 'local',
           configured: true,
           chainId: Number(CHAIN_ID),
           accountId: 0,
@@ -87,6 +138,10 @@ export function registerAgentStatusTool(server: McpServer) {
           humanRemaining: formatDuration(secondsRemaining),
           ready,
           locked,
+          passwordProtected,
+          ...(passwordProtected ? {} : {
+            securityWarning: 'Agent key on disk is encrypted with EMPTY password — anyone with read access to ~/.boros-mcp/agent.enc can decrypt it. Re-run revoke_agent + setup_agent and set a non-empty password to harden.',
+          }),
         };
 
         const onChainFields = onChainExpiryTime !== undefined

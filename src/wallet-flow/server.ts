@@ -1,6 +1,5 @@
 import express from 'express';
 import open from 'open';
-import { DEFAULT_PORT } from '../config.js';
 import { agentKeyStore, pendingActions } from './state.js';
 import { serveHtmlPage, UNLOCK_PAGE_HTML } from './pages.js';
 import { handleComplete } from './routes-complete.js';
@@ -8,7 +7,8 @@ import { unlockAgent } from '../agent/agent-manager.js';
 
 export { createPendingAction, storeAgentKey } from './state.js';
 
-let serverPort: number = DEFAULT_PORT;
+// Set on listen() — 0 = OS picks ephemeral port (RFC 8252 §7.3 loopback redirect).
+let serverPort: number = 0;
 // Lazy: open unlock page only once, on first auth-requiring tool call.
 let unlockBrowserOpened = false;
 
@@ -34,7 +34,7 @@ function corsMiddleware(req: express.Request, res: express.Response, next: expre
   next();
 }
 
-export async function startServer(port?: number): Promise<number> {
+export async function startServer(): Promise<number> {
   const app = express();
   app.use(express.json());
   app.use(corsMiddleware);
@@ -76,27 +76,17 @@ export async function startServer(port?: number): Promise<number> {
     res.json({ data: action.data });
   });
 
-  // 20-port retry budget; wider risks colliding with privileged ports or other dev tools.
-  const startPort = port ?? DEFAULT_PORT;
   return new Promise<number>((resolve, reject) => {
-    const tryPort = (p: number): void => {
-      if (p > startPort + 20) {
-        reject(new Error(`Could not find open port between ${startPort}-${p}`));
+    const srv = app.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      if (addr === null || typeof addr === 'string') {
+        reject(new Error('Unexpected listen address shape (expected AddressInfo)'));
         return;
       }
-      const srv = app.listen(p, '127.0.0.1', () => {
-        serverPort = p;
-        resolve(p);
-      });
-      srv.on('error', (err: NodeJS.ErrnoException) => {
-        if (err.code === 'EADDRINUSE') {
-          tryPort(p + 1);
-        } else {
-          reject(err);
-        }
-      });
-    };
-    tryPort(startPort);
+      serverPort = addr.port;
+      resolve(addr.port);
+    });
+    srv.on('error', reject);
   });
 }
 

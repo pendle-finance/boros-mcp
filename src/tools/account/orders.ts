@@ -6,7 +6,8 @@ import {
 } from '../../utils.js';
 import {
   userAddressField,
-  resumeTokenField,
+  marketIdOptionalField,
+  accountIdField,
   paginationLimitField,
 } from '../_schemas.js';
 import { APR_NOTE } from '../_context.js';
@@ -16,6 +17,38 @@ import { fetchMarketMap, type MarketInfo } from '../../api/market-cache.js';
 import { catchToErrorContent } from '../../agent/errors.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { withAuth } from '../_with-auth.js';
+import { buildIncludeSet, projectFields, includeFieldSchema } from '../_shared/projection.js';
+
+const LIMIT_ORDERS_DEFAULT_FIELDS = [
+  'orderId',
+  'marketId',
+  'marketName',
+  'marketSymbol',
+  'sideLabel',
+  'statusLabel',
+  'orderTypeLabel',
+  'size',
+  'unfilled',
+  'impliedAprPercent',
+] as const;
+const LIMIT_ORDERS_OPTIONAL_FIELDS = [
+  'marketAcc',
+  'marketAccDecoded',
+  'placedAt',
+  'placedTimestamp',
+  'blockTimestamp',
+  'eventIndex',
+  'root',
+  'placedTxHash',
+  'tokenId',
+  'tick',
+  'placedSize',
+  'unfilledSize',
+  'impliedApr',
+  'side',
+  'status',
+  'orderType',
+] as const;
 
 const ORDER_TYPE_LABELS: Record<number, string> = {
   0: 'LIMIT',
@@ -28,20 +61,18 @@ function enrichLimitOrder(
   order: any,
   marketMap: Map<number, MarketInfo>,
   assetMap: Map<number, AssetInfo>,
+  includeSet: ReadonlySet<string>,
 ) {
   const mkt = marketMap.get(order.marketId);
-  // Strip noisy last-updated eventIndex; preserve placedEventIndex (immutable cursor).
-  // Raw impliedApr dropped (carried by *Percent sibling).
   const {
     side, status, orderType,
     placedSize, unfilledSize, impliedApr,
-    blockTimestamp, placedTimestamp, eventIndex, root, marketAcc,
-    ...rest
+    placedTimestamp, blockTimestamp,
   } = order;
   const resolvedTs = placedTimestamp ?? blockTimestamp;
   const orderTypeLabel = orderType !== undefined ? (ORDER_TYPE_LABELS[orderType] ?? 'unknown') : undefined;
-  return {
-    ...rest,
+  const full = {
+    ...order,
     ...(order.marketAcc ? { marketAccDecoded: decodeMarketAcc(order.marketAcc, assetMap) } : {}),
     ...(mkt?.name ? { marketName: mkt.name } : {}),
     ...(mkt?.symbol ? { marketSymbol: mkt.symbol } : {}),
@@ -55,6 +86,7 @@ function enrichLimitOrder(
       ? { impliedAprPercent: enrichAprValue(impliedApr)?.aprPercent }
       : {}),
   };
+  return projectFields(full, includeSet);
 }
 
 export function registerAccountOrdersTools(server: McpServer) {
@@ -62,44 +94,77 @@ export function registerAccountOrdersTools(server: McpServer) {
     'get_limit_orders',
     {
       annotations: { readOnlyHint: true },
-      description: 'List your limit orders, filtered by market and/or active status. Sorted by last-updated event index descending (NOT by placement) — paginating mid-stream can miss/duplicate orders that were updated between pages; use get_all_limit_orders for an immutable placed-event-index sort when fully enumerating. Defaults to active orders only — pass `isActive:false` for filled/cancelled, or `isActive:null` to include every status. To cancel a returned order, pass its `orderId` (not `placedTxHash`) to cancel_orders.',
+      description: `List a user's limit orders. Two sort modes:
+
+\`sort:'updated'\` (default): newest by last-updated event index — supports filtering by \`marketId\` and \`isActive\`. Paginating mid-stream can miss/duplicate orders that were updated between pages. Default \`isActive:true\` returns only currently-open orders. Use this for "open orders" / "pending orders" queries.
+
+\`sort:'placed'\`: newest by placed event index (immutable cursor) — guarantees no orders missed when fully enumerating, but ignores the \`marketId\` and \`isActive\` filters. Higher \`limit\` cap (2000 vs 100). Use when you need the complete history.
+
+To cancel a returned order, pass its \`orderId\` (not \`placedTxHash\`) to \`cancel_orders\`.`,
       inputSchema: {
         userAddress: userAddressField(),
-        accountId: z
-          .number()
-          .default(0)
-          .describe('Account ID (default 0 for main account)'),
-        marketId: z
-          .number()
-          .optional()
-          .describe('Filter by market ID'),
+        accountId: accountIdField('Default 0 for main account.'),
+        sort: z
+          .enum(['updated', 'placed'])
+          .default('updated')
+          .describe('Sort: "updated" (default, supports marketId/isActive filters) or "placed" (immutable cursor, ignores filters).'),
+        marketId: marketIdOptionalField('Filter by market ID. Honored only when sort="updated".'),
         isActive: z
           .boolean()
           .nullable()
           .default(true)
-          .describe('Active status filter. Default true = only currently open orders. Pass false for filled/cancelled only, null to include every status.'),
-        limit: z
-          .number()
-          .min(1)
-          .max(100)
-          .default(20)
-          .describe('Number of orders to return (max 100). Backend allows up to 2000 but we cap to keep LLM context manageable; for full enumeration use get_all_limit_orders.'),
+          .describe('Active status filter (sort="updated" only). Default true. Pass false for filled/cancelled, null to include every status.'),
+        limit: paginationLimitField({ max: 50, defaultValue: 20, desc: 'Number of orders (max 50, default 20).' }),
         resumeToken: z
           .string()
           .optional()
-          .describe('Cursor token from previous response for next page. Backend may return resumeToken even when fewer than `limit` rows are returned; pass it to continue.'),
+          .describe('Cursor token from previous response.'),
+        include: includeFieldSchema({
+          defaults: LIMIT_ORDERS_DEFAULT_FIELDS,
+          optional: LIMIT_ORDERS_OPTIONAL_FIELDS,
+          noun: 'fields per order',
+        }),
       },
     },
-    withAuth(async ({ userAddress, accountId, marketId, isActive, limit, resumeToken }) => {
+    withAuth(async ({ userAddress, accountId, sort, marketId, isActive, limit, resumeToken, include }) => {
       try {
+        const includeSet = buildIncludeSet(include, LIMIT_ORDERS_DEFAULT_FIELDS, LIMIT_ORDERS_OPTIONAL_FIELDS);
+        if (sort === 'placed') {
+          const cappedLimit = Math.min(limit ?? 20, 2000);
+          const res = await fetchWithRetry(() =>
+            openApiGet('/v1/accounts/orders-by-placed-time', {
+              root: userAddress,
+              accountId: accountId ?? 0,
+              limit: cappedLimit,
+              ...(resumeToken ? { resumeToken } : {}),
+            }),
+          );
+          const results = res.results ?? (Array.isArray(res) ? res : []);
+          const [marketMap, assetMap] = await Promise.all([fetchMarketMap(), safeAssetMap()]);
+          const orders = results.map((order: any) => enrichLimitOrder(order, marketMap, assetMap, includeSet));
+          return jsonResult({
+            sort,
+            count: orders.length,
+            sizeUnit: 'YU',
+            orders,
+            ...(res.resumeToken ? { resumeToken: res.resumeToken } : {}),
+            _context: {
+              apr: APR_NOTE,
+              sortOrder: 'Sorted by placed event index descending (immutable). Filters (marketId, isActive) are NOT applied in this mode.',
+              resumeToken: 'Pass this value as resumeToken to fetch the next page. Absent when there are no more results.',
+            },
+          });
+        }
+
+        // sort === 'updated'
+        const cappedLimit = Math.min(limit ?? 20, 100);
         const data = await fetchWithRetry(() =>
           openApiGet('/v1/accounts/orders', {
             root: userAddress,
             accountId: accountId ?? 0,
             ...(marketId !== undefined ? { marketId } : {}),
-            // null = include all statuses (omit param).
             ...(isActive !== null && isActive !== undefined ? { isActive } : {}),
-            limit: limit ?? 20,
+            limit: cappedLimit,
             ...(resumeToken ? { resumeToken } : {}),
           }),
         );
@@ -107,60 +172,18 @@ export function registerAccountOrdersTools(server: McpServer) {
         const results = data.results ?? (Array.isArray(data) ? data : []);
         const [marketMap, assetMap] = await Promise.all([fetchMarketMap(), safeAssetMap()]);
 
-        const orders = results.map((order: any) => enrichLimitOrder(order, marketMap, assetMap));
+        const orders = results.map((order: any) => enrichLimitOrder(order, marketMap, assetMap, includeSet));
 
         return jsonResult({
+          sort,
           count: orders.length,
           sizeUnit: 'YU',
           orders,
           ...(data.resumeToken ? { resumeToken: data.resumeToken } : {}),
           _context: {
             apr: APR_NOTE,
-            sortOrder: 'Sorted by last-updated eventIndex descending. Use get_all_limit_orders for placed-index sort when fully enumerating.',
+            sortOrder: 'Sorted by last-updated eventIndex descending. Use sort="placed" for immutable enumeration.',
             cancellation: 'To cancel, pass `orderId` (not `placedTxHash`) to cancel_orders.',
-          },
-        });
-      } catch (err) {
-        return catchToErrorContent(err);
-      }
-    }),
-  );
-
-  server.registerTool(
-    'get_all_limit_orders',
-    {
-      annotations: { readOnlyHint: true },
-      description: 'Get all limit orders for an account, sorted by placed event index (immutable), using cursor-based pagination. Unlike get_limit_orders, paginating here guarantees no orders are missed. Does not support filtering by market, status, or order type — use get_limit_orders for those.',
-      inputSchema: {
-        userAddress: userAddressField('Wallet address (0x...)'),
-        accountId: z.number().default(0).describe('Account ID (default 0)'),
-        limit: paginationLimitField({ max: 2000, defaultValue: 50 }),
-        resumeToken: resumeTokenField(),
-      },
-    },
-    withAuth(async ({ userAddress, accountId, limit, resumeToken }) => {
-      try {
-        const res = await fetchWithRetry(() =>
-          openApiGet('/v1/accounts/orders-by-placed-time', {
-            root: userAddress,
-            accountId: accountId ?? 0,
-            limit,
-            ...(resumeToken ? { resumeToken } : {}),
-          }),
-        );
-        const results = res.results ?? (Array.isArray(res) ? res : []);
-        const [marketMap, assetMap] = await Promise.all([fetchMarketMap(), safeAssetMap()]);
-        const orders = results.map((order: any) => enrichLimitOrder(order, marketMap, assetMap));
-
-        return jsonResult({
-          count: orders.length,
-          sizeUnit: 'YU',
-          orders,
-          ...(res.resumeToken ? { resumeToken: res.resumeToken } : {}),
-          _context: {
-            apr: APR_NOTE,
-            sortOrder: 'Sorted by placed event index descending (immutable).',
-            resumeToken: 'Pass this value as resumeToken to fetch the next page. Absent when there are no more results.',
           },
         });
       } catch (err) {

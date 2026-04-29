@@ -3,15 +3,17 @@
   "version": "0.1.0-beta.0",
   "description": "MCP server for Boros — Pendle's interest rate derivatives trading platform",
   "type": "module",
-  "bin": {
-    "boros-mcp": "./dist/index.js"
-  },
+  "bin": "./dist/index.js",
   "main": "./dist/index.js",
   "scripts": {
     "build": "tsc && cp -r src/pages dist/pages",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "prepublishOnly": "npm run build"
+    "typecheck": "tsc --noEmit",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "yarn npm publish --tolerate-republish",
+    "prepack": "yarn build"
   },
   "files": [
     "dist",
@@ -45,11 +47,13 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.27.11",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
   },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "packageManager": "yarn@4.13.0"
 }

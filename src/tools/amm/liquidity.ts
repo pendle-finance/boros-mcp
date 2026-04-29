@@ -1,4 +1,3 @@
-// Single-cash AMM liquidity simulate→execute pairs.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { DEFAULT_ACCOUNT_ID } from '../../config.js';
@@ -66,25 +65,27 @@ const NO_MIN_CASH_OUT_WARNING =
 
 export function registerAmmLiquidityTools(server: McpServer) {
   server.registerTool(
-    'simulate_add_liquidity',
+    'add_liquidity',
     {
-      annotations: { readOnlyHint: true },
-      description: `Preview adding single-sided cash liquidity to a market's AMM pool, WITHOUT executing. Returns the backend fee breakdown for the deposit.
+      annotations: { destructiveHint: true },
+      description: `Simulate or execute adding single-sided cash liquidity to a market's AMM pool. Default mode is 'simulate' — ALWAYS run mode:'simulate' first, show the fee preview, then ONLY call mode:'execute' AFTER explicit user confirmation.
 
 UNITS: \`humanCash\` / \`cashAmount\` are in the BOROS-INTERNAL 18-DECIMAL cash unit (NOT token-native decimals — Boros normalizes every collateral to 18d after deposit). One cash unit ≈ 1 USD-equivalent of the market's collateral.
 
-NOTE: the public simulation surface only returns a fee breakdown — it does not project LP-out today, so we cannot derive a default \`minLpOut\`. Pass an explicit \`minLpOut\` to \`add_liquidity\` to bound slippage.
-
-WORKFLOW:
-1. Call this to preview the fees for the deposit.
-2. If the user confirms, call add_liquidity with the same params (plus optional minLpOut) to execute.`,
+\`minLpOut\` (raw 18d bigint string) is REQUIRED for mode:'execute' unless \`acknowledgeNoSlippageProtection:true\` is set. The public sim does NOT project LP-out today, so we cannot derive a default — omitting opens the deposit to MEV/sandwich attacks. Execute requires gas budget; top up via pay_gas if needed.`,
       inputSchema: {
-        marketId: marketIdField('Market ID of the AMM pool to deposit cash into'),
+        mode: z
+          .enum(['simulate', 'execute'])
+          .default('simulate')
+          .describe('"simulate" (default): fee-only preview. "execute": sign and submit via the agent key. ALWAYS simulate first.'),
+        marketId: marketIdField('AMM pool to deposit cash into.'),
         humanCash: z.number().optional().describe('Human-readable cash amount to deposit (e.g. 100.5). Boros-internal 18d cash unit (NOT token-native).'),
         cashAmount: z.string().optional().describe('Raw cash amount as 18d bigint string. Provide either humanCash or cashAmount.'),
+        minLpOut: z.string().optional().describe('Minimum LP tokens to receive, as a raw 18d bigint string. Required for mode:"execute" unless `acknowledgeNoSlippageProtection:true` is set.'),
+        acknowledgeNoSlippageProtection: z.boolean().optional().describe("Set to `true` ONLY when explicitly told by the user to skip MEV protection. When true, `minLpOut` defaults to '0'."),
       },
     },
-    withAuth(async ({ marketId, humanCash, cashAmount }, { rootAddress }) => {
+    withAuth(async ({ mode, marketId, humanCash, cashAmount, minLpOut, acknowledgeNoSlippageProtection }, { rootAddress }) => {
       try {
         const accountId = DEFAULT_ACCOUNT_ID;
         const netCashIn = resolveCash(humanCash, cashAmount);
@@ -103,64 +104,39 @@ WORKFLOW:
           );
         }
 
-        const sim = await fetchWithRetry(() =>
-          openApiPost('/v1/simulations/add-liquidity-to-amm', {
-            root: rootAddress,
-            accountId,
+        if (mode === 'simulate') {
+          const sim = await fetchWithRetry(() =>
+            openApiPost('/v1/simulations/add-liquidity-to-amm', {
+              root: rootAddress,
+              accountId,
+              marketId,
+              netCashIn,
+            }),
+          );
+
+          return jsonResult({
+            ok: true,
+            mode: 'simulate',
+            action: 'add_liquidity',
             marketId,
+            ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
+            marketSymbol,
+            ...(ammId ? { ammId } : {}),
             netCashIn,
-          }),
-        );
-
-        return jsonResult({
-          ok: true,
-          action: 'simulate_add_liquidity',
-          marketId,
-          ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
-          marketSymbol,
-          ...(ammId ? { ammId } : {}),
-          netCashIn,
-          simulation: sim,
-          nextTool: {
-            tool: 'add_liquidity',
-            params: { marketId, humanCash, cashAmount },
-            instruction: 'If the user confirms, call add_liquidity with these params (plus optional minLpOut) to execute. Without an explicit minLpOut the call defaults to 0 (no slippage protection).',
-          },
-          _context: {
-            cashUnit: 'Boros-internal 18d cash unit (not token-native decimals).',
-            minLpOut: NO_MIN_LP_OUT_WARNING,
-          },
-        });
-      } catch (err) {
-        return catchToErrorContent(err);
-      }
-    }),
-  );
-
-  server.registerTool(
-    'add_liquidity',
-    {
-      annotations: { destructiveHint: true },
-      description: `Add single-sided cash liquidity to a market's AMM pool. Builds calldata via the agent endpoint, signs with the agent key, and submits via send-txs-bot. IMPORTANT: Always call simulate_add_liquidity FIRST and show the user the fee preview; only call this after the user confirms.
-
-UNITS: \`humanCash\` / \`cashAmount\` are in the BOROS-INTERNAL 18-DECIMAL cash unit (NOT token-native decimals). \`minLpOut\` is a raw 18d bigint string for LP tokens — defaults to '0' (NO slippage protection) since the public sim does not project LP-out today.
-
-Requires gas budget. If the call fails with "Insufficient gas balance", top up via pay_gas first.`,
-      inputSchema: {
-        marketId: marketIdField('Market ID of the AMM pool to deposit cash into'),
-        humanCash: z.number().optional().describe('Human-readable cash amount to deposit (e.g. 100.5). Boros-internal 18d cash unit (NOT token-native).'),
-        cashAmount: z.string().optional().describe('Raw cash amount as 18d bigint string. Provide either humanCash or cashAmount.'),
-        minLpOut: z.string().optional().describe('Minimum LP tokens to receive, as a raw 18d bigint string. REQUIRED unless `acknowledgeNoSlippageProtection:true` is set — the public sim does not project LP-out today, so omitting this opens the deposit to MEV/sandwich attacks.'),
-        acknowledgeNoSlippageProtection: z.boolean().optional().describe("Set to `true` ONLY when explicitly told by the user to skip MEV protection. When true, `minLpOut` defaults to '0' and the LP could receive less than expected if the AMM state shifts between simulation and execution."),
-      },
-    },
-    withAuth(async ({ marketId, humanCash, cashAmount, minLpOut, acknowledgeNoSlippageProtection }, { rootAddress }) => {
-      try {
-        const accountId = DEFAULT_ACCOUNT_ID;
-        const netCashIn = resolveCash(humanCash, cashAmount);
-        if (BigInt(netCashIn) === 0n) {
-          return errorContent(BorosErrorCode.INVALID_PARAMS, 'netCashIn must be > 0');
+            simulation: sim,
+            nextTool: {
+              tool: 'add_liquidity',
+              params: { mode: 'execute', marketId, humanCash, cashAmount },
+              instruction: 'If the user confirms, call add_liquidity with mode:"execute" and the same params (PLUS an explicit `minLpOut` to bound slippage) to submit.',
+            },
+            _context: {
+              cashUnit: 'Boros-internal 18d cash unit (not token-native decimals).',
+              minLpOut: NO_MIN_LP_OUT_WARNING,
+            },
+          });
         }
+
+        // mode === 'execute'
         if (minLpOut === undefined && !acknowledgeNoSlippageProtection) {
           return errorContent(
             BorosErrorCode.INVALID_PARAMS,
@@ -172,25 +148,16 @@ Requires gas budget. If the call fails with "Insufficient gas balance", top up v
           : '0';
         const minLpOutDefaulted = minLpOut === undefined;
 
-        const market = await getMarketInfo(marketId);
-        const marketNameRaw: string | undefined = market.imData?.name;
-        const marketSymbol: string | undefined = market.metadata?.underlyingSymbol;
-        const ammId: number | undefined = market.extConfig?.ammId ?? market.metadata?.ammId;
-
-        // Best-effort re-sim — not a gate (fee-only surface). Forwarded as response summary.
-        let sim: any = undefined;
-        try {
-          sim = await fetchWithRetry(() =>
-            openApiPost('/v1/simulations/add-liquidity-to-amm', {
-              root: rootAddress,
-              accountId,
-              marketId,
-              netCashIn,
-            }),
-          );
-        } catch {
-          // Swallow — execution will surface errors.
-        }
+        // Pre-flight sim — gate before signing. Failures (RPC blip, gas budget, market state)
+        // bubble to outer catchToErrorContent for classification.
+        const sim = await fetchWithRetry(() =>
+          openApiPost('/v1/simulations/add-liquidity-to-amm', {
+            root: rootAddress,
+            accountId,
+            marketId,
+            netCashIn,
+          }),
+        );
 
         const calldataRes = await fetchWithRetry(() =>
           openApiPost('/v1/calldata-builder/agent/add-liquidity-to-amm', {
@@ -229,6 +196,7 @@ Requires gas budget. If the call fails with "Insufficient gas balance", top up v
 
         return jsonResult({
           ok: true,
+          mode: 'execute',
           action: 'add_liquidity',
           ...(txHash ? { txHash } : {}),
           marketId,
@@ -247,7 +215,7 @@ Requires gas budget. If the call fails with "Insufficient gas balance", top up v
             [BorosErrorCode.INSUFFICIENT_GAS]: {
               name: 'pay_gas',
               args: { marketId, marginMode: 'cross', amount: 1 },
-              why: 'Off-chain gas budget exhausted. Top up first, then re-run add_liquidity with the same params. `amount` is USD.',
+              why: 'Off-chain gas budget exhausted. Top up first, then re-run add_liquidity with mode:"execute". `amount` is USD.',
             },
           },
         });
@@ -256,25 +224,27 @@ Requires gas budget. If the call fails with "Insufficient gas balance", top up v
   );
 
   server.registerTool(
-    'simulate_remove_liquidity',
+    'remove_liquidity',
     {
-      annotations: { readOnlyHint: true },
-      description: `Preview burning LP tokens to receive single-sided cash, WITHOUT executing. Returns the backend fee breakdown for the withdrawal.
+      annotations: { destructiveHint: true },
+      description: `Simulate or execute burning LP tokens to receive single-sided cash from a market's AMM pool. Default mode is 'simulate' — ALWAYS run mode:'simulate' first, show the fee preview, then ONLY call mode:'execute' AFTER explicit user confirmation.
 
-UNITS: \`humanLp\` / \`lpAmount\` are in 18-decimal LP tokens (the AMM's internal LP unit).
+UNITS: \`humanLp\` / \`lpAmount\` are in 18-decimal LP tokens. \`minCashOut\` is a raw 18d bigint string in the BOROS-INTERNAL 18-DECIMAL cash unit (NOT token-native).
 
-NOTE: the public simulation surface only returns a fee breakdown — it does not project cash-out today, so we cannot derive a default \`minCashOut\`. Pass an explicit \`minCashOut\` to \`remove_liquidity\` to bound slippage.
-
-WORKFLOW:
-1. Call this to preview the fees for the withdrawal.
-2. If the user confirms, call remove_liquidity with the same params (plus optional minCashOut) to execute.`,
+\`minCashOut\` is REQUIRED for mode:'execute' unless \`acknowledgeNoSlippageProtection:true\` is set — the public sim does NOT project cash-out today, so omitting opens the burn to MEV/sandwich attacks. Execute requires gas budget; top up via pay_gas if needed.`,
       inputSchema: {
-        marketId: marketIdField('Market ID of the AMM pool to burn LP tokens from'),
+        mode: z
+          .enum(['simulate', 'execute'])
+          .default('simulate')
+          .describe('"simulate" (default): fee-only preview. "execute": sign and submit via the agent key. ALWAYS simulate first.'),
+        marketId: marketIdField('AMM pool to burn LP tokens from.'),
         humanLp: z.number().optional().describe('Human-readable LP amount to burn (e.g. 10.5). 18-decimal LP tokens.'),
         lpAmount: z.string().optional().describe('Raw LP amount as 18d bigint string. Provide either humanLp or lpAmount.'),
+        minCashOut: z.string().optional().describe('Minimum cash to receive, as raw 18d bigint string in the Boros-internal cash unit. Required for mode:"execute" unless `acknowledgeNoSlippageProtection:true` is set.'),
+        acknowledgeNoSlippageProtection: z.boolean().optional().describe("Set to `true` ONLY when explicitly told by the user to skip MEV protection. When true, `minCashOut` defaults to '0'."),
       },
     },
-    withAuth(async ({ marketId, humanLp, lpAmount }, { rootAddress }) => {
+    withAuth(async ({ mode, marketId, humanLp, lpAmount, minCashOut, acknowledgeNoSlippageProtection }, { rootAddress }) => {
       try {
         const accountId = DEFAULT_ACCOUNT_ID;
         const lpToRemove = resolveLp(humanLp, lpAmount);
@@ -293,64 +263,39 @@ WORKFLOW:
           );
         }
 
-        const sim = await fetchWithRetry(() =>
-          openApiPost('/v1/simulations/remove-liquidity-from-amm', {
-            root: rootAddress,
-            accountId,
+        if (mode === 'simulate') {
+          const sim = await fetchWithRetry(() =>
+            openApiPost('/v1/simulations/remove-liquidity-from-amm', {
+              root: rootAddress,
+              accountId,
+              marketId,
+              lpToRemove,
+            }),
+          );
+
+          return jsonResult({
+            ok: true,
+            mode: 'simulate',
+            action: 'remove_liquidity',
             marketId,
+            ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
+            marketSymbol,
+            ...(ammId ? { ammId } : {}),
             lpToRemove,
-          }),
-        );
-
-        return jsonResult({
-          ok: true,
-          action: 'simulate_remove_liquidity',
-          marketId,
-          ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
-          marketSymbol,
-          ...(ammId ? { ammId } : {}),
-          lpToRemove,
-          simulation: sim,
-          nextTool: {
-            tool: 'remove_liquidity',
-            params: { marketId, humanLp, lpAmount },
-            instruction: 'If the user confirms, call remove_liquidity with these params (plus optional minCashOut) to execute. Without an explicit minCashOut the call defaults to 0 (no slippage protection).',
-          },
-          _context: {
-            lpUnit: 'AMM-internal 18d LP token unit.',
-            minCashOut: NO_MIN_CASH_OUT_WARNING,
-          },
-        });
-      } catch (err) {
-        return catchToErrorContent(err);
-      }
-    }),
-  );
-
-  server.registerTool(
-    'remove_liquidity',
-    {
-      annotations: { destructiveHint: true },
-      description: `Burn LP tokens from a market's AMM pool to receive single-sided cash. Builds calldata via the agent endpoint, signs with the agent key, and submits via send-txs-bot. IMPORTANT: Always call simulate_remove_liquidity FIRST and show the user the fee preview; only call this after the user confirms.
-
-UNITS: \`humanLp\` / \`lpAmount\` are in 18-decimal LP tokens. \`minCashOut\` is a raw 18d bigint string in the BOROS-INTERNAL 18-DECIMAL cash unit (NOT token-native) — defaults to '0' (NO slippage protection) since the public sim does not project cash-out today.
-
-Requires gas budget. If the call fails with "Insufficient gas balance", top up via pay_gas first.`,
-      inputSchema: {
-        marketId: marketIdField('Market ID of the AMM pool to burn LP tokens from'),
-        humanLp: z.number().optional().describe('Human-readable LP amount to burn (e.g. 10.5). 18-decimal LP tokens.'),
-        lpAmount: z.string().optional().describe('Raw LP amount as 18d bigint string. Provide either humanLp or lpAmount.'),
-        minCashOut: z.string().optional().describe('Minimum cash to receive, as a raw 18d bigint string in the Boros-internal cash unit. REQUIRED unless `acknowledgeNoSlippageProtection:true` is set — the public sim does not project cash-out today, so omitting this opens the burn to MEV/sandwich attacks.'),
-        acknowledgeNoSlippageProtection: z.boolean().optional().describe("Set to `true` ONLY when explicitly told by the user to skip MEV protection. When true, `minCashOut` defaults to '0' and the burn could return less cash than expected if the AMM state shifts between simulation and execution."),
-      },
-    },
-    withAuth(async ({ marketId, humanLp, lpAmount, minCashOut, acknowledgeNoSlippageProtection }, { rootAddress }) => {
-      try {
-        const accountId = DEFAULT_ACCOUNT_ID;
-        const lpToRemove = resolveLp(humanLp, lpAmount);
-        if (BigInt(lpToRemove) === 0n) {
-          return errorContent(BorosErrorCode.INVALID_PARAMS, 'lpToRemove must be > 0');
+            simulation: sim,
+            nextTool: {
+              tool: 'remove_liquidity',
+              params: { mode: 'execute', marketId, humanLp, lpAmount },
+              instruction: 'If the user confirms, call remove_liquidity with mode:"execute" and the same params (PLUS an explicit `minCashOut` to bound slippage) to submit.',
+            },
+            _context: {
+              lpUnit: 'AMM-internal 18d LP token unit.',
+              minCashOut: NO_MIN_CASH_OUT_WARNING,
+            },
+          });
         }
+
+        // mode === 'execute'
         if (minCashOut === undefined && !acknowledgeNoSlippageProtection) {
           return errorContent(
             BorosErrorCode.INVALID_PARAMS,
@@ -362,25 +307,15 @@ Requires gas budget. If the call fails with "Insufficient gas balance", top up v
           : '0';
         const minCashOutDefaulted = minCashOut === undefined;
 
-        const market = await getMarketInfo(marketId);
-        const marketNameRaw: string | undefined = market.imData?.name;
-        const marketSymbol: string | undefined = market.metadata?.underlyingSymbol;
-        const ammId: number | undefined = market.extConfig?.ammId ?? market.metadata?.ammId;
-
-        // Best-effort re-sim; not a gate (fee-only).
-        let sim: any = undefined;
-        try {
-          sim = await fetchWithRetry(() =>
-            openApiPost('/v1/simulations/remove-liquidity-from-amm', {
-              root: rootAddress,
-              accountId,
-              marketId,
-              lpToRemove,
-            }),
-          );
-        } catch {
-          // Swallow.
-        }
+        // Pre-flight sim — gate before signing.
+        const sim = await fetchWithRetry(() =>
+          openApiPost('/v1/simulations/remove-liquidity-from-amm', {
+            root: rootAddress,
+            accountId,
+            marketId,
+            lpToRemove,
+          }),
+        );
 
         const calldataRes = await fetchWithRetry(() =>
           openApiPost('/v1/calldata-builder/agent/remove-liquidity-from-amm', {
@@ -418,6 +353,7 @@ Requires gas budget. If the call fails with "Insufficient gas balance", top up v
 
         return jsonResult({
           ok: true,
+          mode: 'execute',
           action: 'remove_liquidity',
           ...(txHash ? { txHash } : {}),
           marketId,
@@ -436,7 +372,7 @@ Requires gas budget. If the call fails with "Insufficient gas balance", top up v
             [BorosErrorCode.INSUFFICIENT_GAS]: {
               name: 'pay_gas',
               args: { marketId, marginMode: 'cross', amount: 1 },
-              why: 'Off-chain gas budget exhausted. Top up first, then re-run remove_liquidity with the same params. `amount` is USD.',
+              why: 'Off-chain gas budget exhausted. Top up first, then re-run remove_liquidity with mode:"execute". `amount` is USD.',
             },
           },
         });

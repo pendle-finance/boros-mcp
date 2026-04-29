@@ -75,11 +75,46 @@ export async function resolveActivePosition(
   }
 }
 
-// Newest resting orderIds post-place. Saves caller a get_limit_orders poll. Best-effort.
-export async function resolveRecentOrderIds(
+// Snapshot active orderIds for a (root, accountId, marketId) before a place call.
+// The post-call diff with resolveRecentOrderIdsSinceSnapshot reliably attributes new IDs even
+// when (a) preCancelOrderId removed an order in the same tx, (b) multiple orders placed in one
+// bulk show up out of expected order in the indexer, or (c) concurrent ops change the page.
+export async function snapshotActiveOrderIds(
   userAddress: Address,
   accountId: number,
   marketId: number,
+): Promise<Set<string>> {
+  try {
+    const data = await fetchWithRetry(() =>
+      openApiGet('/v1/accounts/orders', {
+        root: userAddress,
+        accountId,
+        marketId,
+        isActive: true,
+        limit: 100,
+      }),
+    );
+    const results: any[] = data.results ?? (Array.isArray(data) ? data : []);
+    const ids = new Set<string>();
+    for (const o of results) {
+      const id = String(o.orderId ?? '');
+      if (id.length > 0) ids.add(id);
+    }
+    return ids;
+  } catch {
+    return new Set();
+  }
+}
+
+// Returns IDs that are active NOW but were NOT in the pre-snapshot — i.e. genuinely placed by
+// this call. Filters out (a) IDs that were cancelled by the same tx (in pre-snapshot, not in
+// post-fetch), (b) older resting orders (in both), and (c) freshly-placed-then-filled orders
+// (not in post-fetch since isActive:false). Caps result at `expectedCount` newest first.
+export async function resolveRecentOrderIdsSinceSnapshot(
+  userAddress: Address,
+  accountId: number,
+  marketId: number,
+  pre: Set<string>,
   expectedCount: number,
 ): Promise<string[] | undefined> {
   try {
@@ -89,17 +124,16 @@ export async function resolveRecentOrderIds(
         accountId,
         marketId,
         isActive: true,
-        // 2× headroom for concurrent placements + indexer flush; floor 10 for dup-id heuristic.
-        limit: Math.max(expectedCount * 2, 10),
+        limit: Math.max(expectedCount * 2 + pre.size, 20),
       }),
     );
     const results: any[] = data.results ?? (Array.isArray(data) ? data : []);
-    // Backend sorts by placed-event desc; take newest N.
-    return results
-      .slice(0, expectedCount)
+    const newIds = results
       .map((o: any) => String(o.orderId ?? ''))
-      .filter((s) => s.length > 0);
+      .filter((id) => id.length > 0 && !pre.has(id));
+    return newIds.slice(0, expectedCount);
   } catch {
     return undefined;
   }
 }
+

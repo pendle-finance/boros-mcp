@@ -11,8 +11,7 @@ import { registerAccountTools } from './account/index.js';
 import { registerTradingTools } from './trading/index.js';
 import { registerWalletTools } from './wallet/index.js';
 import { registerAuthTools } from './auth/index.js';
-import { registerDocsTools } from './docs/index.js';
-import { registerRouterTool } from './router/index.js';
+import { registerGlossaryTool } from './glossary.js';
 
 export function registerAllTools(server: McpServer): void {
   registerMarketsTools(server);
@@ -27,8 +26,5 @@ export function registerAllTools(server: McpServer): void {
   registerTradingTools(server);
   registerWalletTools(server);
   registerAuthTools(server);
-  registerDocsTools(server);
-  // MUST be last — runs a catalog/registry drift check; tools registered after will be flagged
-  // missing from TOOL_CATALOG (see `assertCatalogMatchesRegistry` in router/drift.ts).
-  registerRouterTool(server);
+  registerGlossaryTool(server);
 }

@@ -15,7 +15,7 @@ export function registerVaultPayTreasuryTool(server: McpServer) {
       annotations: { destructiveHint: true },
       description: 'Top up your off-chain gas budget by pulling collateral tokens DIRECTLY from your EOA wallet (instead of from already-deposited margin). Opens a browser page; YOUR WALLET (root EOA) signs Router.vaultPayTreasury(tokenId, amount) and you pay gas. Tokens transfer to the Boros Router; the backend credits the equivalent USD value to your gas budget after the tx confirms. PREFER `pay_gas` when you have margin collateral — it is agent-signed (no wallet popup) and cheaper. Use `vault_pay_treasury` only when (a) you have not yet deposited collateral, or (b) your agent is unavailable, or (c) you specifically want to keep margin balance untouched. NOTE: this is unrelated to AMM LP vaults (`get_vault_info` / `get_amm_info`); the "vault" name is a contract-level term. First call may prompt for ERC-20 approval; second call signs the actual transfer.',
       inputSchema: {
-        tokenId: tokenIdField('Collateral token ID (must have isCollateral:true).'),
+        tokenId: tokenIdField('Must have isCollateral:true.'),
         amount: z.string().optional().describe('Raw amount in token smallest unit (e.g. 1000000 = 1 USDT0). Provide either amount or humanAmount.'),
         humanAmount: z.number().optional().describe('Human-readable amount (e.g. 0.5 WETH). Provide either amount or humanAmount.'),
       },
@@ -68,7 +68,7 @@ export function registerVaultPayTreasuryTool(server: McpServer) {
             ...enriched,
             txHash: (result as any)?.txHash,
             message: `Treasury payment of ${enriched.humanAmount} ${symbol} submitted; the backend will credit your gas budget after the receipt is indexed.`,
-            nextTool: { name: 'get_gas_balance', args: {}, why: 'Confirm the gas-budget credit landed (may take a few seconds for the indexer).' },
+            nextTool: { name: 'get_gas_info', args: { scope: 'balance' }, why: 'Confirm the gas-budget credit landed (may take a few seconds for the indexer).' },
             url,
           }),
         };

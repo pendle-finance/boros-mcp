@@ -49,167 +49,34 @@ import { withAuth } from '../_with-auth.js';
 
 export function registerCloseTools(server: McpServer) {
   server.registerTool(
-    'simulate_close',
-    {
-      annotations: { readOnlyHint: true },
-      description: `Simulate closing a position WITHOUT executing. Returns a preview of the close fill, PnL, and margin impact. Omit size to close the full active position.
-
-The tool AUTO-FLIPS your input \`side\` (the position side) to derive the counter-order side internally — pass the side of the OPEN position, NOT the close direction.
-
-UNITS: \`size\` is YU, always positive. \`limitApr\` and \`slippage\` are DECIMALS (0.05 = 5%, NOT 5). \`marginMode\` MUST match how the position was opened (cross/isolated) — otherwise the position lookup fails.
-
-WORKFLOW: When a user says they want to close a position:
-1. If needed, use get_positions to find their open position and confirm which one to close.
-2. Ask for any missing info: which position (market + side), partial or full close, market or limit.
-3. Call this tool to simulate and show the preview.
-4. If the user confirms, call close_position with the same params to execute.
-Never skip the simulation step.`,
-      inputSchema: {
-        marketId: marketIdField('Market ID of the position'),
-        side: sideSchema.describe('Side of the EXISTING position (long or short; any case). The tool flips internally to derive the counter-order side.'),
-        size: z.string().optional().describe('Notional size to close in YU, human-readable decimal. Omit for full close. Always positive.'),
-        closeType: z.enum(['market', 'limit']).default('market').describe('Close order type. market → defaults to FOK; limit → defaults to GTC.'),
-        limitApr: z.number().optional().describe('Limit APR for limit close orders as DECIMAL (0.05 = 5%, NOT 5). No upper bound — some markets have legitimately traded at |APR| > 100%.'),
-        marginMode: marginModeField('Margin mode of the position — MUST match how it was opened. cross = per-token shared bucket; isolated = per-market subaccount.'),
-        slippage: slippageField('Max slippage for SIMULATION as DECIMAL (0.05 = 5%, NOT 5). Must match the slippage you plan to pass to close_position.'),
-        timeInForce: timeInForceField(),
-      },
-    },
-    withAuth(async ({ marketId, side, size, closeType, limitApr, marginMode, slippage, timeInForce }, { rootAddress }) => {
-      try {
-        const accountId = DEFAULT_ACCOUNT_ID;
-
-        const market = await getMarketInfo(marketId);
-        const tokenId: number = market.tokenId;
-        const marketNameRaw: string | undefined = market.imData?.name;
-        const marketSymbol: string | undefined = market.metadata?.underlyingSymbol;
-        const collateralSymbol = await resolveCollateralSymbol(tokenId);
-        // Backend no longer auto-picks AMM — sim requires ammId.
-        const ammId: number = market.extConfig?.ammId ?? market.metadata?.ammId ?? 0;
-
-        if (closeType === 'limit' && limitApr === undefined) {
-          return errorContent(BorosErrorCode.INVALID_PARAMS, 'limitApr is required for limit close orders');
-        }
-
-        const marketAcc = resolveMarketAcc(rootAddress, accountId, tokenId, marginMode, marketId);
-
-        // Feeds signedSize+fixedApr to closeTradePnl; also size source on full-close.
-        const activePosition = await resolveActivePosition(rootAddress, accountId, marketId, marketAcc);
-
-        // Reduce-only is NOT enforced anywhere — wrong side opens a NEW position. Reject pre-sim.
-        if (activePosition && activePosition.signedSize) {
-          const signed = BigInt(activePosition.signedSize);
-          if (signed !== 0n) {
-            const positionSide = signed > 0n ? 'long' : 'short';
-            if (positionSide !== side.toLowerCase()) {
-              return errorContent(
-                BorosErrorCode.INVALID_PARAMS,
-                `Position on market ${marketId} (marginMode=${marginMode}) is ${positionSide}, not ${side.toLowerCase()}. Pass side='${positionSide}' to close it. Passing the wrong side would open a NEW position in the opposite direction.`,
-              );
-            }
-          }
-        }
-
-        let sizeRaw: string;
-        if (size) {
-          sizeRaw = parseSize(size).toString();
-        } else {
-          if (!activePosition || !activePosition.signedSize) {
-            return errorContent(
-              BorosErrorCode.INVALID_PARAMS,
-              `No open position found on market ${marketId} (marginMode=${marginMode}) to close. ` +
-                `If the position is on the other margin mode, retry with marginMode='${marginMode === 'cross' ? 'isolated' : 'cross'}'.`,
-            );
-          }
-          const signed = BigInt(activePosition.signedSize);
-          sizeRaw = (signed < 0n ? -signed : signed).toString();
-        }
-
-        const closeSideStr = flipSideString(side);
-        const tif = tifString(closeType, timeInForce);
-        // ALO/SOFT_ALO cannot route through AMM — backend strips ammId, so sim must mirror that.
-        const effectiveAmmId = (tif === 'ALO' || tif === 'SOFT_ALO') ? 0 : ammId;
-
-        // close-position sim removed — use place-order sim (semantically identical now).
-        // Server-side reduce-only dropped; the positionSignedSize check in close_position is the only guard.
-        const sim = await fetchWithRetry(() =>
-          openApiPost('/v1/simulations/place-order', {
-            marketAcc,
-            marketId,
-            side: SIDE_MAP[closeSideStr],
-            size: sizeRaw,
-            tif: TIF_MAP[tif],
-            ...(limitApr !== undefined ? { rate: limitApr } : {}),
-            slippage,
-            ammId: effectiveAmmId,
-          }),
-        );
-
-        // open-api stubs closeTradePnl null — derive locally.
-        const closePnlInputs = gatherCloseTradePnlInputs(activePosition, market);
-
-        return jsonResult({
-          ok: true,
-          marketId,
-          ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
-          marketSymbol,
-          simulation: {
-            ...buildSimEcho(sim, {
-              includeStatus: true,
-              includeLongYield: true,
-              includeClose: true,
-              collateralSymbol,
-              ...closePnlInputs,
-            }),
-            positionSide: side,
-            closeSide: closeSideStr,
-            closeType,
-            timeInForce: tif,
-            size: size ?? 'full',
-            sizeUnit: 'YU',
-            sizeRaw,
-            ...(limitApr !== undefined
-              ? {
-                  limitApr,
-                  limitAprPercent: enrichAprValue(limitApr)?.aprPercent,
-                  ...(limitAprWarning(limitApr) ? { limitAprWarning: limitAprWarning(limitApr) } : {}),
-                }
-              : {}),
-          },
-          nextTool: {
-            tool: 'close_position',
-            params: { marketId, side, size, closeType, limitApr, marginMode, slippage, timeInForce },
-            instruction: 'If the user confirms, call close_position with these params to execute.',
-          },
-          _context: { apr: APR_NOTE },
-        });
-      } catch (err) {
-        return catchToErrorContent(err);
-      }
-    }),
-  );
-
-  server.registerTool(
     'close_position',
     {
       annotations: { destructiveHint: true },
-      description: `Execute closing a position. Simulates first, then signs and submits via the agent place-order calldata endpoint with flipped side. IMPORTANT: Always call simulate_close FIRST and show the user the preview; only call this after the user confirms.
+      description: `Simulate or execute closing a position. Default mode is 'simulate' — ALWAYS run mode:'simulate' first, show the preview, then ONLY call mode:'execute' AFTER explicit user confirmation.
+
+The tool AUTO-FLIPS your input \`side\` (the position side) to derive the counter-order side internally — pass the side of the OPEN position, NOT the close direction. Omit \`size\` to close the full active position.
 
 Reduce-only is NOT enforced server-side anymore (the backend dropped its validateCloseActivePosition path) and the on-chain placeSingleOrder has NO reduce-only flag — the only guard is this tool's local pre-flight check that compares the requested size to the current absolute position size. Between simulate and execute, an external fill or liquidation can shrink/flip the position so that the same size opens a REVERSE position. To reduce risk, prefer partial-close with explicit \`size\` over full-close, and re-simulate immediately before confirming.
 
-UNITS: \`size\` is YU (always positive); pass the OPEN position's \`side\` (the tool flips it). \`limitApr\` and \`slippage\` are DECIMALS. If the close fails with "Insufficient gas balance", top up via pay_gas first.`,
+UNITS: \`size\` is YU, always positive. \`limitApr\` and \`slippage\` are DECIMALS (0.05 = 5%, NOT 5). \`marginMode\` MUST match how the position was opened (cross/isolated) — otherwise the position lookup fails. If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
       inputSchema: {
-        marketId: marketIdField('Market ID of the position'),
-        side: sideSchema.describe('Side of the EXISTING position (long or short; any case). Tool flips internally to derive the counter-order side.'),
-        size: z.string().optional().describe('Notional size to close in YU. Omit for full close. Always positive.'),
+        mode: z
+          .enum(['simulate', 'execute'])
+          .default('simulate')
+          .describe(
+            '"simulate" (default): preview the close fill, PnL, and margin impact. "execute": re-simulate, then sign and submit via the agent place-order calldata endpoint with flipped side. ALWAYS simulate first; execute requires explicit user confirmation.',
+          ),
+        marketId: marketIdField('Market of the position to close.'),
+        side: sideSchema.describe('Side of the EXISTING position (long or short; any case). The tool flips internally to derive the counter-order side.'),
+        size: z.string().optional().describe('Notional size to close in YU, human-readable decimal. Omit for full close. Always positive.'),
         closeType: z.enum(['market', 'limit']).default('market').describe('Close order type. market → defaults to FOK; limit → defaults to GTC.'),
-        limitApr: z.number().optional().describe('Limit APR for limit close orders as DECIMAL (0.05 = 5%, NOT 5). No upper bound — some markets have legitimately traded at |APR| > 100%.'),
-        marginMode: marginModeField('Margin mode of the position — MUST match how it was opened. cross = per-token shared bucket; isolated = per-market subaccount.'),
-        slippage: slippageField('Max slippage tolerance as DECIMAL (0.05 = 5%, NOT 5). Hard max 1 (100%). MUST match what you simulated with.'),
+        limitApr: z.number().optional().describe('Limit APR for limit close orders as DECIMAL (0.05 = 5%, NOT 5). No upper bound.'),
+        marginMode: marginModeField('MUST match how the position was opened.'),
+        slippage: slippageField('MUST match between simulate and execute.'),
         timeInForce: timeInForceField(),
       },
     },
-    withAuth(async ({ marketId, side, size, closeType, limitApr, marginMode, slippage, timeInForce }, { rootAddress }) => {
+    withAuth(async ({ mode, marketId, side, size, closeType, limitApr, marginMode, slippage, timeInForce }, { rootAddress }) => {
       try {
         const accountId = DEFAULT_ACCOUNT_ID;
 
@@ -218,7 +85,6 @@ UNITS: \`size\` is YU (always positive); pass the OPEN position's \`side\` (the 
         const marketNameRaw: string | undefined = market.imData?.name;
         const marketSymbol: string | undefined = market.metadata?.underlyingSymbol;
         const collateralSymbol = await resolveCollateralSymbol(tokenId);
-        // Backend no longer auto-picks AMM — sim + calldata require ammId.
         const ammId: number = market.extConfig?.ammId ?? market.metadata?.ammId ?? 0;
 
         if (closeType === 'limit' && limitApr === undefined) {
@@ -294,6 +160,48 @@ UNITS: \`size\` is YU (always positive); pass the OPEN position's \`side\` (the 
           }),
         );
 
+        const closePnlInputs = gatherCloseTradePnlInputs(activePosition, market);
+
+        if (mode === 'simulate') {
+          return jsonResult({
+            ok: true,
+            mode: 'simulate',
+            marketId,
+            ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
+            marketSymbol,
+            simulation: {
+              ...buildSimEcho(sim, {
+                includeStatus: true,
+                includeLongYield: true,
+                includeClose: true,
+                collateralSymbol,
+                ...closePnlInputs,
+              }),
+              positionSide: side,
+              closeSide: closeSideStr,
+              closeType,
+              timeInForce: tif,
+              size: size ?? 'full',
+              sizeUnit: 'YU',
+              sizeRaw,
+              ...(limitApr !== undefined
+                ? {
+                    limitApr,
+                    limitAprPercent: enrichAprValue(limitApr)?.aprPercent,
+                    ...(limitAprWarning(limitApr) ? { limitAprWarning: limitAprWarning(limitApr) } : {}),
+                  }
+                : {}),
+            },
+            nextTool: {
+              tool: 'close_position',
+              params: { mode: 'execute', marketId, side, size, closeType, limitApr, marginMode, slippage, timeInForce },
+              instruction: 'If the user confirms, call close_position with mode:"execute" and the same params to submit.',
+            },
+            _context: { apr: APR_NOTE },
+          });
+        }
+
+        // mode === 'execute'
         const simErr = assertSimSucceeded(sim, {
           variant: 'close',
           isMarketOrder: closeType === 'market',
@@ -317,7 +225,6 @@ UNITS: \`size\` is YU (always positive); pass the OPEN position's \`side\` (the 
         const calldatas = extractCalldatas(calldataRes);
 
         // placeSingleOrder with flipped side. Pin marketId+cross (not marketAcc — see place_order).
-        // Skip tick check: rate→tick rounding LONG↓/SHORT↑; slippage envelope covers it.
         const sizeForIntent = tryBigInt(sizeRaw);
         const closeIntent: IntentExpectation = {
           selector: ROUTER_SELECTORS.placeSingleOrder,
@@ -340,11 +247,11 @@ UNITS: \`size\` is YU (always positive); pass the OPEN position's \`side\` (the 
         const execErr = executionErrorContent('close_position', result);
         if (execErr) return execErr;
 
-        const closePnlInputs = gatherCloseTradePnlInputs(activePosition, market);
         const txHash = extractTxHash(result);
 
         return jsonResult({
           ok: true,
+          mode: 'execute',
           action: 'close_position',
           ...(txHash ? { txHash } : {}),
           positionSide: side,
@@ -370,7 +277,7 @@ UNITS: \`size\` is YU (always positive); pass the OPEN position's \`side\` (the 
             [BorosErrorCode.INSUFFICIENT_GAS]: {
               name: 'pay_gas',
               args: { marketId, marginMode, amount: 1 },
-              why: 'Off-chain gas budget exhausted. Top up first, then re-run close_position with the same params. `amount` is USD.',
+              why: 'Off-chain gas budget exhausted. Top up first, then re-run close_position with mode:"execute". `amount` is USD.',
             },
           },
         });

@@ -24,6 +24,7 @@ interface EncryptedKey {
 let agentReady = false;
 let agentMeta: AgentMeta | null = null;
 let locked = false; // true when password-protected but not yet unlocked
+let passwordProtected = false; // mirrors EncryptedKey.passwordProtected on disk
 let agentPrivateKey: Hex | null = null;
 let agentAddress: Address | null = null;
 
@@ -53,6 +54,7 @@ function activateAgent(privateKey: Hex): Address {
 
 export function isAgentReady(): boolean { return agentReady; }
 export function isAgentLocked(): boolean { return locked; }
+export function isAgentPasswordProtected(): boolean { return passwordProtected; }
 export function getAgentMeta(): AgentMeta | null { return agentMeta; }
 
 // Blocks until the agent is unlocked via /api/unlock, or the timeout elapses.
@@ -116,6 +118,7 @@ export async function saveAgent(privateKey: Hex, rootAddress: Address, password:
   const agentAddr = activateAgent(privateKey);
 
   const encrypted = encryptKey(privateKey, password);
+  passwordProtected = encrypted.passwordProtected;
   const keyPath = path.join(CONFIG_DIR, AGENT_KEY_FILE);
   fs.writeFileSync(keyPath, JSON.stringify(encrypted, null, 2), { mode: 0o600 });
 
@@ -144,6 +147,7 @@ export async function loadAgent(): Promise<'ready' | 'locked' | 'not_setup'> {
 
   const encRaw = fs.readFileSync(keyPath, 'utf-8');
   const encData = JSON.parse(encRaw) as EncryptedKey;
+  passwordProtected = encData.passwordProtected;
 
   if (!encData.passwordProtected) {
     const privateKey = decryptKey(encData, '');
@@ -182,6 +186,7 @@ export function clearAgent(): void {
   agentReady = false;
   agentMeta = null;
   locked = false;
+  passwordProtected = false;
   agentPrivateKey = null;
   agentAddress = null;
   for (const resolve of unlockWaiters) resolve(false);

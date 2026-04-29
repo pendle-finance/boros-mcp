@@ -1,0 +1,50 @@
+name: Release production package
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'pendle-finance/boros-mcp'
+    environment: npm-registry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    env:
+      BOROS_MCP_NPM_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: yarn install --frozen-lockfile
+
+      - name: Prepare pull request message
+        run: echo "NEW_VERSION=$(yarn changeset status --output=release.json > /dev/null && jq -r '.releases[0].newVersion' release.json && rm release.json)" >> $GITHUB_ENV
+
+      - name: Create release pull request or publish
+        uses: changesets/action@v1
+        with:
+          title: "Releasing v${{ env.NEW_VERSION }}"
+          commit: "v${{ env.NEW_VERSION }}"
+          publish: yarn release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

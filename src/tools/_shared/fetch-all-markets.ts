@@ -12,7 +12,7 @@ export async function fetchAllMarkets(): Promise<any[]> {
     do {
       const res = await fetchWithRetry(() =>
         openApiGet('/v1/markets', {
-          limit: 100,
+          limit: 200,
           isUiWhitelisted: true,
           ...(resumeToken ? { resumeToken } : {}),
         }),

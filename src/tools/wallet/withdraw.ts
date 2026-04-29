@@ -12,6 +12,7 @@ import {
   buildCooldownBlock,
   fetchPendingWithdrawal,
   fetchPendingWithdrawalWithSync,
+  pollForCancelEvent,
 } from './_withdraw-helpers.js';
 import { errorContent, BorosErrorCode } from '../../agent/errors.js';
 
@@ -22,7 +23,7 @@ export function registerWithdrawTool(server: McpServer) {
       annotations: { destructiveHint: true },
       description: 'Request an on-chain withdrawal of collateral from your CROSS margin account. Opens a browser page; YOUR WALLET (root EOA) signs — the agent key is NOT used. Two-step withdrawal: this submits the request, then the protocol auto-finalizes after a cooldown (~12 h on mainnet; can be longer if your account is flagged by the on-chain withdrawal-policy enforcement). There is no separate claim step. To withdraw isolated collateral, first run `cash_transfer({direction:"ISOLATED_TO_CROSS"})`. IMPORTANT: re-running this while a withdrawal is already pending ADDS the new amount to the existing pending balance AND RESETS the cooldown clock — use `cancel_withdraw` if you want to undo. Use `humanAmount` to avoid decimals-unit mistakes.',
       inputSchema: {
-        tokenId: tokenIdField('Token ID of the collateral asset to withdraw'),
+        tokenId: tokenIdField('Asset to withdraw.'),
         amount: z.string().optional().describe('Raw amount (in the token\'s smallest unit). Provide either amount or humanAmount.'),
         humanAmount: z.number().optional().describe('Human-readable amount (e.g. 50.0 USDT). Provide either amount or humanAmount.'),
       },
@@ -112,7 +113,7 @@ export function registerCancelWithdrawTool(server: McpServer) {
       annotations: { destructiveHint: true },
       description: 'Cancel YOUR pending COLLATERAL WITHDRAWAL that is still queued (cooldown or post-cooldown but pre-finalize). Opens a browser page; YOUR WALLET (root EOA) signs — the agent key is NOT used. The contract returns the entire accumulated `user.unscaled` balance back to your cross account; subsequent `withdraw` calls restart the cooldown clock from zero. Use this for vault-withdrawal cancellation only. Do NOT use for: cancelling limit orders (use `cancel_orders`), revoking a trading agent (use `revoke_agent`), or cancelling a deposit (deposits are atomic — no cancel exists). Run `get_collateral` first to find the tokenId of an asset with a pending withdrawal.',
       inputSchema: {
-        tokenId: tokenIdField('Token ID of the collateral asset whose pending withdrawal to cancel', { min: 1 }),
+        tokenId: tokenIdField('Asset whose pending withdrawal to cancel.', { min: 1 }),
         force: z.boolean().default(false).describe('Skip the no-pending-detected guard and submit the on-chain cancel anyway. Use only when you believe the indexer is stale (e.g. you JUST submitted withdraw and it has not propagated yet). Default false — when no pending is detected and the indexer is fresh, the tool returns an error instead of paying gas for a no-op.'),
       },
     },
@@ -178,20 +179,38 @@ export function registerCancelWithdrawTool(server: McpServer) {
             tokenSymbol: symbol,
             ...(pendingWithdrawal ? { pendingWithdrawal } : {}),
           },
-          // cancelVaultWithdrawal silently no-ops (emits ...Canceled(..., 0)) when nothing pending —
-          // `wasNoOp` lets the LLM warn the user.
-          renderResponse: (result, url) => jsonResult({
-            ok: true,
-            action: 'cancel_withdraw',
-            tokenId,
-            symbol,
-            txHash: (result as any)?.txHash,
-            ...(pendingWithdrawal ? { cancelledAmount: pendingWithdrawal } : { wasNoOp: true }),
-            message: pendingWithdrawal
-              ? `Pending withdrawal of ${pendingWithdrawal.humanAmount} ${symbol} has been cancelled. Your collateral remains in your cross margin account.`
-              : `Cancel transaction submitted for ${symbol} but no pending withdrawal was detected pre-flight; the on-chain call may have been a no-op (you still paid gas).`,
-            url,
-          }),
+          // cancelVaultWithdrawal silently no-ops (emits ...Canceled(..., 0)) when nothing pending.
+          // wasNoOp is determined post-tx by polling transfer-logs for a status:'failed' withdraw
+          // matching the txHash — that's how the indexer encodes a real cancellation. Fixes the
+          // false-positive where pre-flight indexer lag made a successful cancel look like a no-op.
+          renderResponse: async (result, url) => {
+            const txHash = (result as any)?.txHash as string | undefined;
+            let cancelledFromChain: { amount: string; symbol: string } | null = null;
+            if (txHash) {
+              cancelledFromChain = await pollForCancelEvent(root, tokenId, txHash);
+            }
+            const cancelledFromPreflight = pendingWithdrawal
+              ? { amount: pendingWithdrawal.humanAmount, symbol }
+              : null;
+            const cancelled = cancelledFromChain ?? cancelledFromPreflight;
+            return jsonResult({
+              ok: true,
+              action: 'cancel_withdraw',
+              tokenId,
+              symbol,
+              ...(txHash ? { txHash } : {}),
+              ...(cancelled
+                ? {
+                    cancelledAmount: cancelled.amount,
+                    cancelledAmountSource: cancelledFromChain ? 'on_chain_event' : 'preflight_indexer',
+                  }
+                : { wasNoOp: true }),
+              message: cancelled
+                ? `Pending withdrawal of ${cancelled.amount} ${cancelled.symbol} has been cancelled. Your collateral remains in your cross margin account.`
+                : `Cancel transaction submitted for ${symbol}. No cancellation event was detected on-chain within the polling window; the call was likely a no-op (you still paid gas). If you submitted a withdraw moments ago, run get_transfer_logs to double-check.`,
+              url,
+            });
+          },
         };
       },
       });

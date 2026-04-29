@@ -5,11 +5,9 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { registerAllTools } from './tools/register.js';
 import { startServer } from './wallet-flow/server.js';
 import { loadAgent } from './agent/agent-manager.js';
-import { DEFAULT_PORT } from './config.js';
 
 async function main() {
-  const port = parseInt(process.env.BOROS_MCP_PORT ?? String(DEFAULT_PORT), 10);
-  const actualPort = await startServer(port);
+  const actualPort = await startServer();
   process.stderr.write(`[boros-mcp] Localhost server running on http://127.0.0.1:${actualPort}\n`);
 
   const agentState = await loadAgent();

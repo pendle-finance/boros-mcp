@@ -10,6 +10,8 @@ import {
 import {
   userAddressField,
   tokenIdFieldOptional,
+  marketIdOptionalField,
+  paginationLimitField,
 } from '../_schemas.js';
 import { APR_NOTE, AMOUNTS_IN_COLLATERAL_NOTE } from '../_context.js';
 
@@ -18,6 +20,80 @@ import { fetchMarketMap } from '../../api/market-cache.js';
 import { catchToErrorContent } from '../../agent/errors.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { withAuth } from '../_with-auth.js';
+import { buildIncludeSet, projectFields, includeFieldSchema } from '../_shared/projection.js';
+
+const PNL_HISTORY_DEFAULT_FIELDS = [
+  'marketId',
+  'marketName',
+  'marketSymbol',
+  'sideLabel',
+  'settledAt',
+  'settlementRatePercent',
+  'positionSize',
+  'settlement',
+  'cumulativeSettlementPnl',
+] as const;
+const PNL_HISTORY_OPTIONAL_FIELDS = [
+  'marketAcc',
+  'positionValue',
+  'yieldPaid',
+  'yieldReceived',
+  'fee',
+  'sinceOpenSettlementPnl',
+  'settlementRate',
+  'side',
+  'timestamp',
+  'eventIndex',
+  'txHash',
+  'tokenId',
+] as const;
+
+const TX_HISTORY_DEFAULT_FIELDS = [
+  'marketId',
+  'marketName',
+  'marketSymbol',
+  'sideLabel',
+  'tradedAt',
+  'tradeRatePercent',
+  'tradeSize',
+  'tradeValue',
+  'pnl',
+  'fee',
+] as const;
+const TX_HISTORY_OPTIONAL_FIELDS = [
+  'marketAcc',
+  'txHash',
+  'eventIndex',
+  'timestamp',
+  'tradeRate',
+  'side',
+  'orderId',
+  'positionPreSize',
+  'positionPostSize',
+  'positionPreSignedSize',
+  'positionPostSignedSize',
+] as const;
+
+const TRANSFER_LOG_DEFAULT_FIELDS = [
+  'at',
+  'transferType',
+  'amount',
+  'amountSymbol',
+  'status',
+  'fromType',
+  'toType',
+] as const;
+const TRANSFER_LOG_OPTIONAL_FIELDS = [
+  'tokenId',
+  'fromMarketId',
+  'toMarketId',
+  'eventIndex',
+  'txHash',
+  'blockTimestamp',
+  'requestId',
+  'cooldownEnd',
+  'cooldownEndIso',
+] as const;
 
 export function registerAccountHistoryTools(server: McpServer) {
   server.registerTool(
@@ -31,23 +107,20 @@ export function registerAccountHistoryTools(server: McpServer) {
           .number()
           .default(0)
           .describe('Account ID (default 0 for main account)'),
-        marketId: z
-          .number()
-          .optional()
-          .describe('Filter by market ID'),
-        limit: z
-          .number()
-          .min(1)
-          .max(2000)
-          .default(20)
-          .describe('Number of settlement records to return (max 2000, default 20).'),
+        marketId: marketIdOptionalField('Filter by market ID.'),
+        limit: paginationLimitField({ max: 50, defaultValue: 20, desc: 'Number of settlement records to return (max 50, default 20).' }),
         resumeToken: z
           .string()
           .optional()
           .describe('Cursor token from previous response for next page.'),
+        include: includeFieldSchema({
+          defaults: PNL_HISTORY_DEFAULT_FIELDS,
+          optional: PNL_HISTORY_OPTIONAL_FIELDS,
+          noun: 'fields per settlement record',
+        }),
       },
     },
-    withAuth(async ({ userAddress, accountId, marketId, limit, resumeToken }) => {
+    withAuth(async ({ userAddress, accountId, marketId, limit, resumeToken, include }) => {
       try {
         const data = await fetchWithRetry(() =>
           openApiGet('/v1/accounts/settlement-events', {
@@ -64,15 +137,15 @@ export function registerAccountHistoryTools(server: McpServer) {
         // Single-market: hoist marketName/Symbol to top, drop per-row. Multi: per-row.
         const singleMarket = marketId !== undefined;
         const topMkt = singleMarket ? marketMap.get(marketId!) : undefined;
+        const includeSet = buildIncludeSet(include, PNL_HISTORY_DEFAULT_FIELDS, PNL_HISTORY_OPTIONAL_FIELDS);
         const settlements = results.map((s: any) => {
           const mkt = marketMap.get(s.marketId);
           const {
             side, positionSize, positionValue, yieldPaid, yieldReceived, fee, settlement,
-            cumulativeSettlementPnl, sinceOpenSettlementPnl, settlementRate,
-            timestamp, ...rest
+            cumulativeSettlementPnl, sinceOpenSettlementPnl,
           } = s;
-          return {
-            ...rest,
+          const full = {
+            ...s,
             ...(!singleMarket
               ? {
                   ...(mkt?.name ? { marketName: mkt.name } : {}),
@@ -91,6 +164,7 @@ export function registerAccountHistoryTools(server: McpServer) {
             ...(cumulativeSettlementPnl !== undefined ? { cumulativeSettlementPnl: formatX18(cumulativeSettlementPnl) } : {}),
             ...(sinceOpenSettlementPnl !== undefined ? { sinceOpenSettlementPnl: formatX18(sinceOpenSettlementPnl) } : {}),
           };
+          return projectFields(full, includeSet);
         });
 
         return jsonResult({
@@ -130,10 +204,7 @@ export function registerAccountHistoryTools(server: McpServer) {
           .number()
           .default(0)
           .describe('Account ID (default 0 for main account)'),
-        marketId: z
-          .number()
-          .optional()
-          .describe('Filter by market ID. If omitted, queries all markets with active positions (no pagination across closed markets).'),
+        marketId: marketIdOptionalField('Filter by market ID. If omitted, queries all markets with active positions (no pagination across closed markets).'),
         marginMode: z
           .enum(['cross', 'isolated'])
           .default('cross')
@@ -141,16 +212,21 @@ export function registerAccountHistoryTools(server: McpServer) {
         limit: z
           .number()
           .min(1)
-          .max(2000)
+          .max(50)
           .default(20)
-          .describe('Number of transactions per market (max 2000, default 20).'),
+          .describe('Number of transactions per market (max 50, default 20).'),
         resumeToken: z
           .string()
           .optional()
           .describe('Cursor token from previous response (single-market mode only).'),
+        include: includeFieldSchema({
+          defaults: TX_HISTORY_DEFAULT_FIELDS,
+          optional: TX_HISTORY_OPTIONAL_FIELDS,
+          noun: 'fields per fill',
+        }),
       },
     },
-    withAuth(async ({ userAddress, accountId, marketId, marginMode, limit, resumeToken }) => {
+    withAuth(async ({ userAddress, accountId, marketId, marginMode, limit, resumeToken, include }) => {
       try {
         const marketMap = await fetchMarketMap();
 
@@ -207,11 +283,12 @@ export function registerAccountHistoryTools(server: McpServer) {
           );
           const results = data.results ?? (Array.isArray(data) ? data : []);
           if (singleMarket) nextResumeToken = data.resumeToken;
+          const includeSet = buildIncludeSet(include, TX_HISTORY_DEFAULT_FIELDS, TX_HISTORY_OPTIONAL_FIELDS);
           for (const tx of results) {
             const mkt = marketMap.get(tx.marketId ?? q.marketId);
-            const { side, tradeSize, tradeRate, tradeValue, fee, pnl, ...txRest } = tx;
-            allTransactions.push({
-              ...txRest,
+            const { side, tradeSize, tradeValue, fee, pnl } = tx;
+            const full = {
+              ...tx,
               ...(!singleMarket
                 ? {
                     ...(mkt?.name ? { marketName: mkt.name } : {}),
@@ -225,7 +302,8 @@ export function registerAccountHistoryTools(server: McpServer) {
               ...(tradeValue !== undefined ? { tradeValue: formatX18(tradeValue) } : {}),
               ...(fee !== undefined ? { fee: formatX18(fee) } : {}),
               ...(pnl !== undefined ? { pnl: formatX18(pnl) } : {}),
-            });
+            };
+            allTransactions.push(projectFields(full, includeSet));
           }
         }
 
@@ -257,27 +335,32 @@ export function registerAccountHistoryTools(server: McpServer) {
     'get_transfer_logs',
     {
       annotations: { readOnlyHint: true },
-      description: 'Boros internal collateral ledger — vault deposits/withdrawals, cross↔isolated transfers, isolated↔isolated transfers, and AMM↔cross (vault deposit/withdraw) cash moves. NOT ERC-20 Transfer events. Withdrawals appear as `pending` during cooldown and flip to `success` on finalisation (or `failed` on cancel). Direction is encoded by fromType→toType — `amount` is always non-negative. tokenId filter can be derived from get_assets. Use get_transaction_history for trade fills, get_pnl_history for funding settlements, get_gas_history for gas budget movements.',
+      description: 'Boros internal collateral ledger — vault deposits/withdrawals, cross↔isolated transfers, isolated↔isolated transfers, and AMM↔cross (vault deposit/withdraw) cash moves. NOT ERC-20 Transfer events. Withdrawals appear as `pending` during cooldown and flip to `success` on finalisation (or `failed` on cancel). Direction is encoded by fromType→toType — `amount` is always non-negative. tokenId filter can be derived from get_assets. Use get_transaction_history for trade fills, get_pnl_history for funding settlements, get_gas_info(scope:"history") for gas budget movements.',
       inputSchema: {
         userAddress: userAddressField(),
         accountId: z
           .number()
           .default(0)
           .describe('Account ID (default 0 for main account)'),
-        tokenId: tokenIdFieldOptional('Filter by collateral token ID'),
+        tokenId: tokenIdFieldOptional('Filter by collateral token.'),
         limit: z
           .number()
           .min(1)
-          .max(100)
+          .max(50)
           .default(20)
-          .describe('Number of records to return (max 100)'),
+          .describe('Number of records to return (max 50)'),
         resumeToken: z
           .string()
           .optional()
           .describe('Cursor token from previous response for next page'),
+        include: includeFieldSchema({
+          defaults: TRANSFER_LOG_DEFAULT_FIELDS,
+          optional: TRANSFER_LOG_OPTIONAL_FIELDS,
+          noun: 'fields per transfer log',
+        }),
       },
     },
-    withAuth(async ({ userAddress, accountId, tokenId, limit, resumeToken }) => {
+    withAuth(async ({ userAddress, accountId, tokenId, limit, resumeToken, include }) => {
       try {
         const data = await fetchWithRetry(() =>
           openApiGet('/v1/accounts/transfer-logs', {
@@ -302,16 +385,17 @@ export function registerAccountHistoryTools(server: McpServer) {
           if (from === 'amm' && to === 'cross_account') return 'vault_withdraw';
           return `${from}_to_${to}`;
         };
+        const includeSet = buildIncludeSet(include, TRANSFER_LOG_DEFAULT_FIELDS, TRANSFER_LOG_OPTIONAL_FIELDS);
         const logs = results.map((log: any) => {
           const asset = log.tokenId !== undefined ? assetMap.get(log.tokenId) : undefined;
           const symbol = asset?.symbol;
           // Wire `amount` is FixedX18 regardless of native ERC-20 decimals; asX18 brand keeps the
           // type system from accepting rawToHuman(amount, asset.decimals).
-          const { amount, blockTimestamp, fromFundLocation, toFundLocation, ...rest } = log;
+          const { amount } = log;
           const fromType = log.fromFundLocation?.fundType;
           const toType = log.toFundLocation?.fundType;
-          return {
-            ...rest,
+          const full = {
+            ...log,
             ...(log.blockTimestamp ? { at: enrichTimestamp(log.blockTimestamp) } : {}),
             ...(amount !== undefined && amount !== null ? { amount: formatX18(asX18(amount)) } : {}),
             ...(symbol ? { amountSymbol: symbol } : {}),
@@ -321,6 +405,7 @@ export function registerAccountHistoryTools(server: McpServer) {
             ...(log.fromFundLocation?.marketId !== undefined ? { fromMarketId: log.fromFundLocation.marketId } : {}),
             ...(log.toFundLocation?.marketId !== undefined ? { toMarketId: log.toFundLocation.marketId } : {}),
           };
+          return projectFields(full, includeSet);
         });
 
         return jsonResult({

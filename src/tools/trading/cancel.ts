@@ -6,7 +6,7 @@ import { type IntentExpectation } from '../../agent/signing.js';
 import { ROUTER_SELECTORS } from '../../chain/selectors.js';
 import { jsonResult, analyzeExecution } from '../../utils.js';
 import { catchToErrorContent, errorContent, BorosErrorCode } from '../../agent/errors.js';
-import { marginModeField } from '../_schemas.js';
+import { marginModeField, marketIdField } from '../_schemas.js';
 import { getMarketInfo, resolveMarketAcc } from './_market.js';
 import {
   executeAgentAction,
@@ -22,13 +22,13 @@ export function registerCancelTools(server: McpServer) {
     'cancel_orders',
     {
       annotations: { destructiveHint: true },
-      description: 'Cancel one or more limit orders on a market. Provide specific orderIds or set cancelAll to true. NOTE on `atomic:false`: the on-chain bulkCancels does ignore stale ids, BUT the backend pre-flight simulator currently rejects the WHOLE batch (with MarketOrderNotFound) if any id is unknown to the simulator state — so a known-stale id mixed with valid ones can still abort the call. Filter stale ids client-side (via get_limit_orders) before calling, or pass each suspect id alone.',
+      description: 'Cancel one or more limit orders on a market. Provide specific orderIds or set cancelAll to true. Stale-id handling: with `atomic:false` the on-chain bulkCancels silently skips ids that are filled/cancelled. With `atomic:true` the contract reverts on any unknown id. The backend pre-flight simulator may also reject the whole batch when an id is unknown to its state — observed inconsistently in 2026-Q2 testing, so the safest pattern is still to filter stale ids client-side via get_limit_orders before calling, especially under atomic:true. `cancelledCount` reflects the number of orders actually removed from the book (computed from the active-orders diff), NOT the request size.',
       inputSchema: {
-        marketId: z.number().describe('Market ID'),
+        marketId: marketIdField(),
         orderIds: z.array(z.string().regex(/^\d+$/, 'orderId must be a numeric string')).optional().describe('Array of order ID strings to cancel. Mutually exclusive with cancelAll:true.'),
         cancelAll: z.boolean().default(false).describe('Cancel all open orders on this market. Mutually exclusive with orderIds.'),
         marginMode: marginModeField(),
-        atomic: z.boolean().default(true).describe('true (default): whole batch reverts if any cancel fails. false: best-effort on-chain — stale ids are ignored at execution. CAVEAT: backend pre-flight simulator still rejects the whole batch if any id is unknown to its state, so filter stale ids client-side first. MM workflows usually want false.'),
+        atomic: z.boolean().default(true).describe('true (default): whole batch reverts if any cancel fails (and the contract treats any unknown id as failure). false: best-effort on-chain — stale ids are silently skipped. The backend pre-flight simulator can still reject a mixed-stale batch under either setting; pre-filter stale ids via get_limit_orders for reliable MM workflows.'),
       },
     },
     withAuth(async ({ marketId, orderIds, cancelAll, marginMode, atomic }, { rootAddress }) => {
@@ -51,43 +51,83 @@ export function registerCancelTools(server: McpServer) {
         const marketNameRaw: string | undefined = market.imData?.name;
         const marketSymbol: string | undefined = market.metadata?.underlyingSymbol;
 
-        // Pre-flight count of open orders for cancelAll — drives accurate cancelledCount
-        // (status.successCount counts contract calls, not individual order cancellations) and
-        // lets us short-circuit when the book is already empty (saves gas).
-        let prevOpenCount: number | undefined;
-        if (cancelAll) {
-          try {
-            const ordersRes = await fetchWithRetry(() =>
-              openApiGet('/v1/accounts/orders', {
-                root: rootAddress,
-                accountId,
-                marketId,
-                isActive: true,
-                limit: 100,
-              }),
-            );
-            const openOrders: any[] = Array.isArray(ordersRes)
-              ? ordersRes
-              : (ordersRes.results ?? []);
-            prevOpenCount = openOrders.length;
-          } catch {
-            // Fall through — if the indexer is flaky, still submit the tx (it's a no-op on-chain).
-            prevOpenCount = undefined;
-          }
-          if (prevOpenCount === 0) {
-            return jsonResult({
-              ok: true,
-              action: 'cancel_orders',
+        // Pre-flight active-order snapshot — drives accurate cancelledCount in BOTH paths:
+        // - cancelAll: short-circuit when book is already empty (saves gas), and tell the user how
+        //   many orders were taken off the book.
+        // - explicit orderIds: filter stale ids out of the cancelledCount so a mix of valid+stale
+        //   doesn't inflate the report (Finding #6: callers thought 2 cancels happened when only 1
+        //   was actually live).
+        let preActiveSet: Set<string> | undefined;
+        try {
+          const ordersRes = await fetchWithRetry(() =>
+            openApiGet('/v1/accounts/orders', {
+              root: rootAddress,
+              accountId,
               marketId,
-              ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
-              marketSymbol,
-              cancelledAll: true,
-              orderIds: [],
-              cancelledCount: 0,
-              atomic,
-              skippedReason: 'No open orders detected pre-flight; on-chain tx skipped to save gas.',
-            });
-          }
+              isActive: true,
+              limit: 100,
+            }),
+          );
+          const openOrders: any[] = Array.isArray(ordersRes)
+            ? ordersRes
+            : (ordersRes.results ?? []);
+          preActiveSet = new Set(
+            openOrders
+              .map((o: any) => String(o.orderId ?? ''))
+              .filter((s) => s.length > 0),
+          );
+        } catch {
+          preActiveSet = undefined;
+        }
+
+        const prevOpenCount = preActiveSet?.size;
+        if (cancelAll && prevOpenCount === 0) {
+          return jsonResult({
+            ok: true,
+            action: 'cancel_orders',
+            marketId,
+            ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
+            marketSymbol,
+            cancelledAll: true,
+            orderIds: [],
+            cancelledCount: 0,
+            atomic,
+            skippedReason: 'No open orders detected pre-flight; on-chain tx skipped to save gas.',
+          });
+        }
+
+        // For explicit orderIds: pre-flight count of ids that are actually active (excludes stale).
+        const liveRequestedCount =
+          !cancelAll && orderIds && preActiveSet
+            ? orderIds.filter((id) => preActiveSet!.has(id)).length
+            : undefined;
+
+        // atomic:false + we have a fresh active-orders snapshot → drop stale ids client-side
+        // before sending. Backend pre-flight simulator otherwise rejects the WHOLE batch on a
+        // single unknown id (MarketOrderNotFound), even though the on-chain bulkCancels would
+        // have silently skipped them. If everything was stale, short-circuit to ok:true.
+        const filteredOrderIds =
+          !cancelAll && orderIds && !atomic && preActiveSet
+            ? orderIds.filter((id) => preActiveSet!.has(id))
+            : orderIds;
+        const droppedStaleIds =
+          !cancelAll && orderIds && !atomic && preActiveSet
+            ? orderIds.filter((id) => !preActiveSet!.has(id))
+            : [];
+        if (!cancelAll && !atomic && filteredOrderIds && filteredOrderIds.length === 0 && (orderIds?.length ?? 0) > 0) {
+          return jsonResult({
+            ok: true,
+            action: 'cancel_orders',
+            marketId,
+            ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
+            marketSymbol,
+            cancelledAll: false,
+            orderIds: [],
+            cancelledCount: 0,
+            atomic,
+            skippedStaleIds: droppedStaleIds,
+            skippedReason: 'Every requested orderId was already filled/cancelled before this call (atomic:false short-circuit; on-chain tx skipped to save gas).',
+          });
         }
 
         const calldataRes = await fetchWithRetry(() =>
@@ -96,7 +136,7 @@ export function registerCancelTools(server: McpServer) {
               marketAcc,
               marketId,
               cancelAll: cancelAll ?? false,
-              ...(orderIds && orderIds.length > 0 ? { orderIds } : {}),
+              ...(filteredOrderIds && filteredOrderIds.length > 0 ? { orderIds: filteredOrderIds } : {}),
             }],
           }),
         );
@@ -108,8 +148,8 @@ export function registerCancelTools(server: McpServer) {
           selector: ROUTER_SELECTORS.bulkCancels,
           marketId,
           cross: marginMode !== 'isolated',
-          ...(orderIds && orderIds.length > 0
-            ? { orderIdsSubset: orderIds.map((s) => BigInt(s)) }
+          ...(filteredOrderIds && filteredOrderIds.length > 0
+            ? { orderIdsSubset: filteredOrderIds.map((s) => BigInt(s)) }
             : {}),
         };
 
@@ -123,17 +163,52 @@ export function registerCancelTools(server: McpServer) {
 
         // Count from execution status, not request size — partial reverts must not inflate count.
         // For cancelAll, status.successCount is the number of bulkCancels calls (≈1), not the
-        // number of orders cancelled — fall back to the pre-flight openOrders count so an
-        // already-empty book doesn't wrongly report cancelledCount:1.
+        // number of orders cancelled — fall back to the pre-flight openOrders count.
+        // For explicit orderIds, fall back to the pre-flight LIVE count (Finding #6: stale ids
+        // would otherwise be counted as cancelled because bulkCancels silently skips them).
         const status = analyzeExecution(result);
-        const requestedCount = cancelAll ? prevOpenCount ?? null : (orderIds?.length ?? 0);
+        const requestedCount = cancelAll
+          ? prevOpenCount ?? null
+          : (liveRequestedCount ?? orderIds?.length ?? 0);
         const cancelledCount = status.allSuccess
           ? (requestedCount ?? status.successCount)
           : status.successCount;
+        const skippedStaleIds =
+          !cancelAll && orderIds && liveRequestedCount !== undefined
+            ? orderIds.filter((id) => !preActiveSet!.has(id))
+            : undefined;
+        // Distinguish a "real" revert from one caused entirely by stale ids the contract would
+        // have silently skipped. With atomic:false, the latter is a successful partial cancel,
+        // not a failure — flip ok back to true and surface a partialOk:true marker.
+        const allRevertsAreStaleId =
+          !atomic &&
+          status.revertCount > 0 &&
+          status.reverts.every((r: any) => /MarketOrderNotFound/.test(String(r?.error ?? '')));
 
         if (atomic && status.revertCount > 0) {
           const execErr = executionErrorContent('cancel_orders', result);
           if (execErr) return execErr;
+        }
+        if (allRevertsAreStaleId) {
+          const txHash = extractTxHash(result);
+          return jsonResult({
+            ok: true,
+            partialOk: true,
+            action: 'cancel_orders',
+            ...(txHash ? { txHash } : {}),
+            marketId,
+            ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
+            marketSymbol,
+            cancelledAll: Boolean(cancelAll),
+            orderIds: cancelAll ? [] : (orderIds ?? []),
+            cancelledCount: status.successCount,
+            atomic,
+            ...(skippedStaleIds && skippedStaleIds.length > 0
+              ? { skippedStaleIds, skippedStaleNote: 'Backend pre-flight rejected these as MarketOrderNotFound; on-chain bulkCancels would have silently skipped them. atomic:false treats this as partial success.' }
+              : {}),
+            reverts: status.reverts,
+            execution: result,
+          });
         }
 
         const txHash = extractTxHash(result);
@@ -148,6 +223,12 @@ export function registerCancelTools(server: McpServer) {
           cancelledAll: Boolean(cancelAll),
           orderIds: cancelAll ? [] : (orderIds ?? []),
           cancelledCount,
+          ...(skippedStaleIds && skippedStaleIds.length > 0
+            ? {
+                skippedStaleIds,
+                skippedStaleNote: `${skippedStaleIds.length} of the requested orderIds were already filled/cancelled before this call. The contract silently skipped them; cancelledCount excludes them.`,
+              }
+            : {}),
           atomic,
           ...(status.revertCount > 0
             ? { reverts: status.reverts }

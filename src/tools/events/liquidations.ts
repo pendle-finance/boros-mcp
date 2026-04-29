@@ -1,8 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
 import { openApiGet } from '../../api/open-api.js';
 import { jsonResult, enrichAprValue, enrichTimestamp } from '../../utils.js';
-import { marketIdOptionalField } from '../_schemas.js';
+import { marketIdOptionalField, borosUnixTimestampField, paginationLimitField } from '../_schemas.js';
 import { APR_NOTE } from '../_context.js';
 import { catchToErrorContent } from '../../agent/errors.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
@@ -12,20 +11,12 @@ export function registerEventsLiquidationsTools(server: McpServer): void {
     'get_liquidation_events',
     {
       annotations: { readOnlyHint: true },
-      description: 'Get recent forced-liquidation events sorted newest-first. Each event shows the violator and liquidator positions before/after, mark APR at liquidation, the APR the liquidation trade executed at, the YU size moved, and the tx hash. Filter by market and/or time range. NOT the same as periodic funding settlements (use get_settlement_summary) and NOT a voluntary close (use get_transaction_history). For raw on-chain Liquidate logs see get_on_chain_events.',
+      description: 'Get recent forced-liquidation events sorted newest-first. Each event shows the violator and liquidator positions before/after, mark APR at liquidation, the APR the liquidation trade executed at, the YU size moved, and the tx hash. Filter by market and/or time range. NOT the same as periodic funding settlements (use get_settlement_summary) and NOT a voluntary close (use get_transaction_history). For raw on-chain Liquidate logs see get_on_chain_events. Pagination (max 50 per call): to page older history, set toTimestamp = (oldest event timestamp from prior page) - 1.',
       inputSchema: {
-        marketId: marketIdOptionalField('Filter by market ID'),
-        fromTimestamp: z
-          .number()
-          .min(1753334471, 'fromTimestamp must be >= 1753334471 (Boros launch epoch — backend rejects earlier values)')
-          .optional()
-          .describe('Unix seconds inclusive lower bound (must be >= 1753334471, the Boros launch epoch)'),
-        toTimestamp: z
-          .number()
-          .min(1753334471, 'toTimestamp must be >= 1753334471 (Boros launch epoch — backend rejects earlier values)')
-          .optional()
-          .describe('Unix seconds inclusive upper bound (must be >= 1753334471, the Boros launch epoch)'),
-        limit: z.number().min(1).max(2000).default(20).describe('Max results (default 20, capped at 2000)'),
+        marketId: marketIdOptionalField('Filter by market.'),
+        fromTimestamp: borosUnixTimestampField('fromTimestamp', 'Unix seconds inclusive lower bound.'),
+        toTimestamp: borosUnixTimestampField('toTimestamp', 'Unix seconds inclusive upper bound.'),
+        limit: paginationLimitField({ max: 50, defaultValue: 20 }),
       },
     },
     async ({ marketId, fromTimestamp, toTimestamp, limit }) => {

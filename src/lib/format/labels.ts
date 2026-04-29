@@ -43,7 +43,7 @@ export function orderStatusLabel(
   return base;
 }
 
-// Labels round-trip via Zod enums on place_orders/place_ladders without remapping.
+// Labels round-trip via Zod enums on place_orders without remapping.
 const TIME_IN_FORCE_LABELS: Record<number, string> = {
   0: 'GTC',
   1: 'IOC',

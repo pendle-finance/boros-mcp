@@ -2,4 +2,12 @@ dist/
 node_modules/
 .claude
 CLAUDE.md
+opencode.json
 
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*

@@ -80,6 +80,47 @@ export async function fetchPendingWithdrawal(
   }
 }
 
+// Polls /v1/accounts/transfer-logs looking for a cancellation entry (status:'failed' withdraw)
+// matching the given txHash. Used post-tx by cancel_withdraw to confirm whether the on-chain call
+// actually cancelled a pending balance, vs. was a true no-op.
+// Returns the cancelled amount (decimal string) if a match is found, or null after timeout.
+export async function pollForCancelEvent(
+  userAddress: Address,
+  tokenId: number,
+  txHash: string,
+  timeoutMs = 8000,
+  intervalMs = 1500,
+): Promise<{ amount: string; symbol: string } | null> {
+  const target = txHash.toLowerCase();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetchWithRetry(() =>
+        openApiGet('/v1/accounts/transfer-logs', {
+          root: userAddress,
+          accountId: 0,
+          tokenId,
+          limit: 5,
+        }),
+      );
+      const rows = Array.isArray(res?.results) ? res.results : Array.isArray(res) ? res : [];
+      for (const r of rows) {
+        const rowTx = String(r.txHash ?? '').toLowerCase();
+        if (rowTx !== target) continue;
+        // status:'failed' on a withdraw transfer is how the indexer encodes cancellations
+        // (Router.cancelVaultWithdrawal returns funds → indexer marks the original request as failed).
+        if (r.transferType !== 'withdraw' || r.status !== 'failed') continue;
+        return {
+          amount: String(r.amount ?? '0'),
+          symbol: String(r.amountSymbol ?? `TOKEN-${tokenId}`),
+        };
+      }
+    } catch { /* keep polling */ }
+    await new Promise((res) => setTimeout(res, intervalMs));
+  }
+  return null;
+}
+
 // Returns pending + indexer syncStatus.timestamp from the same /collaterals/summary/single call.
 // Used by cancel_withdraw to decide whether the absence-of-pending signal is trustworthy
 // (fresh indexer) or possibly stale (recent withdraw still indexing).

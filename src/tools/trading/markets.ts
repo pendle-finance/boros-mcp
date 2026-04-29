@@ -15,16 +15,17 @@ import {
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { dedupTtl } from '../../lib/dedup.js';
 import { withAuth } from '../_with-auth.js';
+import { marketIdField } from '../_schemas.js';
 
 export function registerMarketsTools(server: McpServer) {
   server.registerTool(
     'enter_exit_markets',
     {
       annotations: { destructiveHint: true },
-      description: 'Enter or exit markets on the cross account. Entering a market allows trading on it under cross margin. Exiting removes it (requires no open positions).',
+      description: 'Enter or exit markets on the cross account. Entering a market allows trading on it under cross margin. Exiting requires zero position size AND zero open limit orders. NOTE: entering a market draws a per-market entry fee (~$10 of cross collateral, on top of the off-chain gas budget) — if your cross account is below this floor the call reverts with "Top up at least ~$10 to trade"; deposit more cross collateral first. NOTE: matured markets cannot be exited today — the calldata-builder rejects them with "Market X is expired", so they remain permanently in get_entered_markets until that path is opened. The pre-flight here detects matured markets and returns a clear error before paying gas.',
       inputSchema: {
         action: z.enum(['enter', 'exit']).describe('Whether to enter or exit the markets'),
-        marketIds: z.array(z.number()).min(1, 'marketIds must contain at least one market ID').describe('Array of market IDs to enter or exit (at least one required)'),
+        marketIds: z.array(marketIdField()).min(1, 'marketIds must contain at least one market ID').describe('Array of market IDs to enter or exit (at least one required)'),
       },
     },
     withAuth(async ({ action, marketIds }, { rootAddress }) => {
@@ -35,14 +36,38 @@ export function registerMarketsTools(server: McpServer) {
 
         // Exit pre-check: contract requires signedSize==0 AND nOrders==0 (MarketHubEntry.exitMarket)
         // — fetch both positions + resting orders per marketId to avoid MMMarketExitDenied revert.
+        // Also fetch market metadata so matured markets can be flagged client-side (the
+        // calldata-builder rejects them with "Market X is expired" — we want a clear pre-flight
+        // error instead of a blind round-trip + paid gas).
         if (!isEnter) {
-          const positions = await fetchWithRetry(() =>
-            openApiGet('/v1/accounts/active-positions', {
-              root: rootAddress,
-              accountId,
-            }),
-          );
-          const posArray = Array.isArray(positions) ? positions : (positions.results ?? []);
+          const [positions, marketsInfo] = await Promise.all([
+            fetchWithRetry(() =>
+              openApiGet('/v1/accounts/active-positions', {
+                root: rootAddress,
+                accountId,
+              }),
+            ),
+            Promise.all(
+              marketIds.map(async (mid) => {
+                try {
+                  const m = await fetchWithRetry(() =>
+                    openApiGet(`/v1/markets/${mid}`),
+                  );
+                  return { mid, isMatured: Boolean(m?.isMatured ?? (typeof m?.maturity === 'number' && m.maturity * 1000 <= Date.now())) };
+                } catch {
+                  return { mid, isMatured: false };
+                }
+              }),
+            ),
+          ]);
+          const matured = marketsInfo.filter((m) => m.isMatured).map((m) => m.mid);
+          if (matured.length > 0) {
+            return errorContent(
+              BorosErrorCode.INVALID_PARAMS,
+              `Cannot exit matured market(s): ${matured.join(', ')}. The Boros calldata-builder rejects exit on matured markets ("Market X is expired"). Matured markets stay permanently in get_entered_markets — there is no current workaround. To exit live markets in this batch, omit the matured ids from marketIds.`,
+            );
+          }
+          const posArray = Array.isArray(positions) ? positions : ((positions as any).results ?? []);
           const blockers: { marketId: number; signedSize?: string; openOrderCount?: number }[] = [];
           const blockerByMarket = new Map<number, { signedSize?: string; openOrderCount?: number }>();
           for (const p of posArray) {

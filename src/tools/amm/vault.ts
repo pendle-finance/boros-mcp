@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { openApiGet } from '../../api/open-api.js';
 import { jsonResult } from '../../utils.js';
-import { userAddressFieldOptional } from '../_schemas.js';
+import { userAddressFieldOptional, marketIdOptionalField, accountIdField, paginationLimitField } from '../_schemas.js';
 import { APR_NOTE } from '../_context.js';
 import { catchToErrorContent, errorContent, BorosErrorCode } from '../../agent/errors.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
@@ -103,37 +103,24 @@ export function registerAmmVaultTools(server: McpServer): void {
     {
       annotations: { readOnlyHint: true },
       description: `Get Boros LP vault info: TVL (totalValue, in collateral-asset decimals), LP token supply, supply cap, lpPrice, lpApy (combined fees+incentives), and optionally your deposit position.
-With marketId: single-vault detail. Without marketId: summary list across all vaults — per-vault user blocks are suppressed by default; pass fullDetail=true to include them (response can exceed 50 KB).
+With marketId: single-vault detail. Without marketId: summary list — by default only ACTIVE vaults (maturity > now) plus any matured vaults where the caller still holds LP. Pass includeMatured=true for the full set. Per-vault user blocks are suppressed by default; pass fullDetail=true to include them (response can exceed 50 KB).
 Use this for: vault TVL, LP APY, fillPercent, my deposit position. Do NOT use for: protocol-level TVL (get_tvl), AMM swap-state math (get_amm_info), claimable LP rewards (get_amm_user_rewards), or the wallet-side treasury payment (vault_pay_treasury — unrelated despite the name).`,
       inputSchema: {
-        marketId: z
-          .number()
-          .int()
-          .positive()
-          .optional()
-          .describe('Market ID for a specific vault. Omit to get the all-vaults summary.'),
-        userAddress: userAddressFieldOptional('Wallet address (0x...) to include user-specific vault position data (only materialised in single-vault mode or when fullDetail=true).'),
-        accountId: z
-          .number()
-          .int()
-          .min(0)
-          .max(255)
-          .default(0)
-          .describe('Account ID (1-byte: 0-255). Default 0. Only used when userAddress is provided.'),
+        marketId: marketIdOptionalField('Specific vault. Omit to get the all-vaults summary.'),
+        userAddress: userAddressFieldOptional('Include user-specific vault position data (only materialised in single-vault mode or when fullDetail=true). When set in list mode, also surfaces matured vaults where the caller still holds LP.'),
+        accountId: accountIdField('Only used when userAddress is provided.'),
         fullDetail: z
           .boolean()
           .default(false)
           .describe('Only meaningful in list mode (no marketId). When true, include the full per-vault user position object. Default false.'),
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(500)
-          .default(50)
-          .describe('Max vaults to return in list mode (default 50).'),
+        includeMatured: z
+          .boolean()
+          .default(false)
+          .describe('List mode only. When true, include vaults whose maturity has passed (residual LP only). Default false — matured vaults appear only when the caller has a non-zero LP balance there.'),
+        limit: paginationLimitField({ max: 100, defaultValue: 50, desc: 'Max vaults to return in list mode (default 50, max 100 — matches the backend hard cap).' }),
       },
     },
-    async ({ marketId, userAddress, accountId, fullDetail, limit }) => {
+    async ({ marketId, userAddress, accountId, fullDetail, includeMatured, limit }) => {
       try {
         const account = userAddress
           ? packAccount(userAddress as Address, accountId ?? 0)
@@ -162,43 +149,69 @@ Use this for: vault TVL, LP APY, fillPercent, my deposit position. Do NOT use fo
         }
 
         const allMarkets = await fetchAllMarkets();
-        const ammMarketIds: number[] = allMarkets
-          .filter((m: any) => {
-            const id = m.extConfig?.ammId ?? m.metadata?.ammId;
-            return typeof id === 'number' && id !== 0;
-          })
-          .map((m: any) => m.marketId as number);
-
-        // API cap 100 — surface overflow via truncated.
-        const apiCappedIds = ammMarketIds.slice(0, 100);
-        const globals = await fetchAmmStates(apiCappedIds);
+        const nowSec = Math.floor(Date.now() / 1000);
+        const ammMarkets = allMarkets.filter((m: any) => {
+          const id = m.extConfig?.ammId ?? m.metadata?.ammId;
+          return typeof id === 'number' && id !== 0;
+        });
+        const ammMarketIds: number[] = ammMarkets.map((m: any) => m.marketId as number);
+        const activeAmmIds = new Set<number>(
+          ammMarkets
+            .filter((m: any) => (m.imData?.maturity ?? 0) > nowSec)
+            .map((m: any) => m.marketId as number),
+        );
 
         let userByMarketId: Map<number, UserAmmState> | undefined;
         if (account) {
           const userStates = await fetchUserAmmStates(account);
           userByMarketId = new Map(userStates.map((u) => [u.marketId, u]));
         }
+        const userDepositIds = new Set<number>();
+        if (userByMarketId) {
+          for (const [mid, u] of userByMarketId) {
+            if (u.totalLp && u.totalLp !== '0') userDepositIds.add(mid);
+          }
+        }
+
+        const effectiveIds = ammMarketIds.filter((id) => {
+          if (includeMatured) return true;
+          if (activeAmmIds.has(id)) return true;
+          return userDepositIds.has(id);
+        });
+
+        // API cap 100 — surface overflow via truncated.
+        const apiCappedIds = effectiveIds.slice(0, 100);
+        const globals = await fetchAmmStates(apiCappedIds);
 
         const allVaults = globals.map((g) => {
           const u = userByMarketId?.get(g.marketId);
           const enriched = enrichVault(g, u);
-          if (!fullDetail && enriched.user) {
-            const { user, ...slim } = enriched;
+          const matured = !activeAmmIds.has(g.marketId);
+          const decorated = matured ? { ...enriched, matured: true } : enriched;
+          if (!fullDetail && decorated.user) {
+            const { user, ...slim } = decorated;
             return slim;
           }
-          return enriched;
+          return decorated;
         });
         const vaults = allVaults.slice(0, limit);
+        const maturedShown = vaults.filter((v: any) => v.matured).length;
 
         return jsonResult({
-          total: allVaults.length,
+          totalAmm: ammMarketIds.length,
+          activeAmm: activeAmmIds.size,
+          eligible: effectiveIds.length,
           count: vaults.length,
-          truncated: allVaults.length > vaults.length || ammMarketIds.length > apiCappedIds.length,
+          maturedShown,
+          truncated: effectiveIds.length > vaults.length,
           fullDetail: !!fullDetail,
+          includeMatured: !!includeMatured,
           vaults,
           _context: {
             ...vaultContext,
             listMode: 'Per-vault `user` object is hidden by default. Pass fullDetail=true (or use marketId) to include it.',
+            filtering: 'Default list shows ACTIVE vaults (maturity > now) plus matured vaults where the caller still has LP. Pass includeMatured=true to see every AMM-enabled market regardless of maturity.',
+            matured: 'Vaults flagged `matured: true` no longer accept new swaps; LP can still withdraw residual collateral.',
             totalTvlUsd: 'No longer returned by the backend (the v2 aggregate endpoint was removed). Sum totalValue per collateral via get_assets if you need a USD figure.',
           },
         });

@@ -6,12 +6,12 @@ import {
   marketIdField,
   timeFrameField,
   unixTimestampFieldOptional,
+  paginationLimitField,
   TIMEFRAME_SECONDS,
 } from '../_schemas.js';
 import { APR_NOTE } from '../_context.js';
 import { catchToErrorContent, errorContent, BorosErrorCode } from '../../agent/errors.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
-import { OPEN_API_URL } from '../../config.js';
 import { fetchAllMarkets } from '../_shared/fetch-all-markets.js';
 
 export function registerMarketsIndicatorsTools(server: McpServer): void {
@@ -20,31 +20,34 @@ export function registerMarketsIndicatorsTools(server: McpServer): void {
     {
       annotations: { readOnlyHint: true },
       description: `Get market indicators over time as overlays for chart analysis. All rate fields are decimals (0.05 = 5%).
-Indicators: u = underlying CEX funding rate; fp = quarterly futures premium (annualised decimal); fgi = fear & greed index (integer 0-100, exposed as fearGreedIndex + fearGreedClassification); ap = underlying asset spot USD price; udma = N-day moving average of u, computed for each value of udmaPeriods (1-365 days, up to 10 periods).
+Indicators: u = underlying perp funding rate (annualized; CEX or DEX venue per market); fp = quarterly futures premium (annualised decimal); fgi = fear & greed index (integer 0-100, exposed as fearGreedIndex + fearGreedClassification); ap = underlying asset spot USD price; udma = N-day moving average of u, computed for each value of udmaPeriods (1-365 days, up to 10 periods).
 Use this for fundamental analysis overlays. When udma is selected, the lookback window is automatically expanded to cover max(udmaPeriods) days so the rolling average has enough history.
-Do NOT use this for OHLCV candlestick data — use get_chart instead. For larger CSV exports, use get_indicators_export.`,
+Do NOT use this for OHLCV candlestick data — use get_market_ohlcv instead.
+Pagination (max 50 points per call): to fetch older history, set endTimestamp = (oldest timestamp from prior page) - 1 and pass startTimestamp = endTimestamp - 50 * timeFrameSeconds. Timeframe seconds: 5m=300, 1h=3600, 1d=86400, 1w=604800.`,
       inputSchema: {
-        marketId: marketIdField('The numeric market ID', { min: 0 }),
+        marketId: marketIdField(),
         timeFrame: timeFrameField({ defaultValue: '1h' }),
         select: z
           .array(z.enum(['u', 'fp', 'fgi', 'ap', 'udma']))
           .min(1)
-          .describe('Indicators to fetch: u (underlying CEX funding rate), fp (quarterly futures premium), fgi (fear & greed index), ap (asset spot USD price), udma (rolling mean of u). Indicators that are unavailable for the market are omitted and listed under `warnings` in the response.'),
+          .describe('Indicators to fetch: u (underlying perp funding rate, annualized; CEX or DEX venue per market), fp (quarterly futures premium), fgi (fear & greed index), ap (asset spot USD price), udma (rolling mean of u). Indicators that are unavailable for the market are omitted and listed under `warnings` in the response.'),
         udmaPeriods: z
           .array(z.number().int().min(1).max(365))
           .max(10)
           .optional()
           .describe('Moving-average windows in days for udma (e.g. [7, 30]). Each period must be 1-365; up to 10 periods allowed. Defaults to [7, 30] when udma is selected.'),
-        limit: z.number().int().min(1).max(500).default(20).describe(
-          'Number of most recent data points to return (default 20, max 500). Ignored when startTimestamp is provided.',
-        ),
+        limit: paginationLimitField({
+          max: 50,
+          defaultValue: 20,
+          desc: 'Number of data points to return (default 20, max 50). Ignored when startTimestamp is provided. To page beyond 50, use endTimestamp; see tool description.',
+        }),
         startTimestamp: unixTimestampFieldOptional(
           'startTimestamp',
-          'Start timestamp (Unix seconds; not milliseconds). When provided, limit is ignored.',
+          'Start timestamp (Unix seconds; not milliseconds). When paging older history, set startTimestamp = endTimestamp - 50 * timeFrameSeconds.',
         ),
         endTimestamp: unixTimestampFieldOptional(
           'endTimestamp',
-          'End timestamp (Unix seconds). Must be >= startTimestamp.',
+          'End timestamp (Unix seconds). Must be >= startTimestamp. Set to (oldest timestamp from prior page) - 1 to page backwards.',
         ),
       },
     },
@@ -153,70 +156,28 @@ Do NOT use this for OHLCV candlestick data — use get_chart instead. For larger
             };
           }),
           _context: {
-            apr: APR_NOTE,
-            underlyingApr: 'Annualized underlying CEX funding rate as decimal (0.05 = 5%). NOT the same as Boros markApr — that is the on-Boros mark.',
-            futurePremium: 'Quarterly futures basis (annualized decimal). Positive = futures > spot.',
-            fearGreedIndex: '0-100 integer; 0 = extreme fear, 100 = extreme greed.',
-            fearGreedClassification: 'Human label: "Extreme Fear", "Fear", "Neutral", "Greed", "Extreme Greed".',
-            assetPrice: 'Underlying asset spot price in USD (interpolated hourly snapshot; may differ slightly from get_market.assetMarkPrice which is the live oracle).',
+            ...(select.includes('u') || select.includes('fp') || wantsUdma
+              ? { apr: APR_NOTE }
+              : {}),
+            ...(select.includes('u') || wantsUdma
+              ? { underlyingApr: 'Annualized underlying perp funding rate as decimal (0.05 = 5%); CEX or DEX venue per market (Binance/Bybit/OKX/Gate or Hyperliquid/Lighter). NOT the same as Boros markApr — that is the on-Boros mark.' }
+              : {}),
+            ...(select.includes('fp')
+              ? { futurePremium: 'Quarterly futures basis (annualized decimal). Positive = futures > spot.' }
+              : {}),
+            ...(select.includes('fgi')
+              ? {
+                  fearGreedIndex: '0-100 integer; 0 = extreme fear, 100 = extreme greed.',
+                  fearGreedClassification: 'Human label: "Extreme Fear", "Fear", "Neutral", "Greed", "Extreme Greed".',
+                }
+              : {}),
+            ...(select.includes('ap')
+              ? { assetPrice: 'Underlying asset spot price in USD (interpolated hourly snapshot; may differ slightly from get_market.assetMarkPrice which is the live oracle).' }
+              : {}),
             warnings: 'When the backend cannot serve a requested indicator (e.g. market has no fundingRateSymbol), it is dropped from the response and listed here.',
             ...(wantsUdma
-              ? { udma: `Rolling daily moving averages of underlying CEX funding rate for periods (days): ${effectivePeriods.join(', ')}. Decimals.` }
+              ? { udma: `Rolling daily moving averages of underlying perp funding rate for periods (days): ${effectivePeriods.join(', ')}. Decimals.` }
               : {}),
-          },
-        });
-      } catch (err) {
-        return catchToErrorContent(err);
-      }
-    },
-  );
-
-  server.registerTool(
-    'get_indicators_export',
-    {
-      annotations: { readOnlyHint: true },
-      description: 'Export market OHLCV + optional indicators as CSV (up to 10,000 rows). Rate-limited to 3 requests per minute per IP. Use get_chart or get_market_indicators for JSON instead.',
-      inputSchema: {
-        marketId: marketIdField('Market ID'),
-        timeFrame: timeFrameField({ desc: 'Candle time frame' }),
-        startTimestamp: z.number().optional().describe('Start timestamp (Unix seconds)'),
-        endTimestamp: z.number().optional().describe('End timestamp (Unix seconds), default now'),
-        select: z.string().optional().describe('Additional indicators, comma-separated. Supported: u, fp, fgi, ap, udma:<periods> (e.g. "u,fgi,udma:7;30")'),
-      },
-    },
-    async ({ marketId, timeFrame, startTimestamp, endTimestamp, select }) => {
-      try {
-        const url = new URL(`${OPEN_API_URL}/v1/indicators/export`);
-        url.searchParams.set('marketId', String(marketId));
-        url.searchParams.set('timeFrame', timeFrame);
-        if (startTimestamp !== undefined) url.searchParams.set('startTimestamp', String(startTimestamp));
-        if (endTimestamp !== undefined) url.searchParams.set('endTimestamp', String(endTimestamp));
-        if (select) url.searchParams.set('select', select);
-
-        const csv = await fetchWithRetry(async () => {
-          const response = await fetch(url.toString());
-          if (!response.ok) {
-            const body = await response.text().catch(() => '');
-            const err = new Error(`API ${response.status}: ${response.statusText} — ${body}`);
-            (err as any).status = response.status;
-            // Mirror open-api.ts: surface NestJS body fields (incl. structured `message`)
-            // so classifyError can map 400 validation errors to INVALID_PARAMS.
-            try { Object.assign(err, JSON.parse(body)); } catch {}
-            throw err;
-          }
-          return response.text();
-        });
-        const lines = csv.split('\n');
-        return jsonResult({
-          marketId,
-          timeFrame,
-          rowCount: Math.max(0, lines.length - 1),
-          headers: lines[0] ?? '',
-          csv,
-          _context: {
-            format: 'CSV with OHLCV always included plus any requested indicators.',
-            rateLimit: '3 requests per minute per IP.',
-            maxRows: 10000,
           },
         });
       } catch (err) {

@@ -1,47 +1,47 @@
 # @pendle/boros-mcp
 
-An [MCP](https://modelcontextprotocol.io) server that lets your AI assistant trade interest rate derivatives on [Boros](https://boros.finance) — Pendle's funding rate swap platform on Arbitrum.
+[MCP](https://modelcontextprotocol.io) server that lets your AI assistant trade interest rate derivatives on [Boros](https://boros.finance) — Pendle's funding rate swap platform on Arbitrum.
 
-Ask your model things like *"what's the current 3-month funding rate on BTC perp?"*, *"open a 0.5 ETH long on the 30-day market at 8% APR"*, or *"show my open positions and unrealized PnL"* — and it can answer or execute, end-to-end.
+Ask things like *"current 3-month BTC perp funding rate?"*, *"open 0.5 ETH long on the 30-day market at 8% APR"*, *"show open positions and unrealized PnL"*.
 
-## What you get
-
-- **57 tools** covering market data, account state, trading, and wallet operations
-- **Delegated agent keys** — the LLM signs trades with an ephemeral key you authorize once, your main wallet stays cold
-- **Simulate-then-execute** — every order is previewed before it touches the chain
-- **Cross-margin and isolated-margin** support
-- **Read-only by default** — destructive tools are clearly marked and require explicit approval
+- **44 tools**: market data, account state, trading, wallet, AMM
+- **Delegated agent key** — LLM signs trades with an ephemeral key you authorize once; main wallet stays cold
+- **Simulate-then-execute** — every order previewed before chain submit
+- Cross-margin and isolated-margin
+- Wallet ops always re-prompt your real browser wallet
 
 ## Install
 
-> **Beta release.** The package is currently published under the `beta` dist-tag. Use `@beta` to install, or pin a specific `0.x.y-beta.z` version.
+> Beta — published under the `beta` dist-tag. Use `@beta` or pin `0.x.y-beta.z`.
 
-Requires Node.js ≥ 18. The package ships a `boros-mcp` binary, so `npx` works without a global install:
+Node ≥ 18. Ships a `boros-mcp` binary.
 
 ```bash
 npx -y @pendle/boros-mcp@beta
+# or
+yarn global add @pendle/boros-mcp@beta && boros-mcp
 ```
 
-Or install globally:
-
-```bash
-npm install -g @pendle/boros-mcp@beta
-boros-mcp
-```
-
-Building from source is only needed if you're hacking on the server:
+From source (only if hacking on it):
 
 ```bash
 git clone https://github.com/pendle-finance/boros-mcp
-cd boros-mcp
-npm install && npm run build
+cd boros-mcp && yarn install && yarn build
 ```
 
 ## Configure your client
 
-### Claude Desktop / Claude Code
+Server speaks MCP over **stdio**.
 
-Add to your MCP config (`~/.claude/claude_desktop_config.json` or equivalent):
+**Claude Code** (one command):
+
+```bash
+claude mcp add boros -- npx -y @pendle/boros-mcp@beta
+```
+
+Add `--scope user` for global. Verify: `claude mcp list`.
+
+**Claude Desktop / Gemini CLI / opencode / others** — add the canonical config:
 
 ```json
 {
@@ -54,71 +54,97 @@ Add to your MCP config (`~/.claude/claude_desktop_config.json` or equivalent):
 }
 ```
 
-If you built from source, point at the local entry instead:
+Config file location:
 
-```json
-{
-  "mcpServers": {
-    "boros": {
-      "command": "node",
-      "args": ["/absolute/path/to/boros-mcp/dist/index.js"]
-    }
-  }
-}
+| Client | Path |
+|---|---|
+| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Gemini CLI | `~/.gemini/settings.json` |
+| Codex CLI | `~/.codex/config.toml` (TOML, see below) |
+| opencode | `~/.config/opencode/opencode.json` (wrap under `"mcp"`, set `"type": "local"`) |
+
+Codex CLI (TOML):
+
+```toml
+[mcp_servers.boros]
+command = "npx"
+args = ["-y", "@pendle/boros-mcp@beta"]
 ```
 
-### Other MCP clients
+**From source** — replace the command block with:
 
-Run `npx -y @pendle/boros-mcp@beta` (or `boros-mcp` if installed globally) and point your client at it over stdio transport.
+```json
+"command": "node",
+"args": ["/absolute/path/to/boros-mcp/dist/index.js"]
+```
 
-## First-run setup
+Restart the client to load the server.
 
-On first use, ask your assistant to *"set up a Boros agent"*. The server will:
+## How approvals work — read this first
 
-1. Generate a fresh Ethereum keypair (the **agent key**) locally
-2. Open a browser page where you connect your real wallet and approve the agent on Boros's Router contract
-3. Encrypt the agent key with AES-256-GCM and store it at `~/.boros-mcp/agent.enc`
+Boros MCP is **not** a pure JSON-RPC MCP. Alongside the stdio MCP channel it spins up a small HTTP server on `127.0.0.1:<random-port>` to broker browser-side wallet signatures. Necessary because Boros wallet operations require signatures from your **real** wallet, which lives in the browser, not in the LLM.
 
-The agent key expires after 30 days. Revoke it any time with *"revoke my Boros agent"*.
+### Two classes of action
 
-Your main wallet only signs once (the approval). Every trade after that is signed by the delegated agent.
+| Class | Tools | Signing key | Browser involved? |
+|---|---|---|---|
+| **Trading & AMM** | `place_order`, `place_orders`, `close_position`, `cancel_orders`, `add_liquidity`, `remove_liquidity`, `cash_transfer`, … | **Agent key** (delegated, on-disk) | No — fully autonomous |
+| **Wallet & agent lifecycle** | `setup_agent`, `revoke_agent`, `deposit`, `withdraw`, `cancel_withdraw`, `vault_pay_treasury` | **Your main wallet** | Yes — browser callback |
 
-## What it can do
+### Localhost callback flow
 
-| Domain | Examples |
-|---|---|
-| **Market data** | List markets, get orderbook, funding rate history, AMM info, price charts, market indicators |
-| **Account** | Open positions, PnL, transaction history, gas balance, settlement summary |
-| **Trading** | Place / cancel orders, place ladders, close positions, cash transfers between markets |
-| **Wallet** | Deposit, withdraw, cancel pending withdrawals (browser-signed by your main wallet) |
-| **Discovery** | Built-in router that picks the right tool for a natural-language request, plus searchable docs |
+When you run e.g. *"deposit 100 USDC into Boros"*:
 
-Run *"list Boros tools"* with the server connected for the full list and per-tool descriptions.
+1. Tool call returns a localhost URL with a one-time token: `http://127.0.0.1:<ephemeral-port>/deposit?token=<uuid>`. Server auto-opens it; URL is also echoed to stderr (`[boros-mcp] Opening browser: …`) so you can paste manually.
+2. Page prompts your browser wallet (MetaMask, Rabby, …) to sign and broadcast the tx. Private key never leaves the browser.
+3. After confirmation, page POSTs `txHash` back to the same localhost port.
+4. Server **verifies the receipt on-chain**: tx hit `ROUTER_ADDRESS`, function selector is in the per-action allowlist, signed-from address matches your registered wallet. Only then does the tool call resolve success to the LLM.
+
+If verification fails (wrong contract, wrong selector, wrong signer), the tool call errors and nothing further happens.
+
+### First-run agent setup
+
+On first use, ask *"set up a Boros agent"*. The server:
+
+1. Generates a fresh Ethereum keypair (the **agent key**) in-process.
+2. Opens an `/approve-agent` page where you connect your real wallet and **sign one EIP-712 typed message** (not a transaction — no gas paid; `send-txs-bot` relays the approval on-chain).
+3. Once the relay tx confirms, encrypts the agent key with AES-256-GCM (scrypt-derived KDF, optional password) and stores it at `~/.boros-mcp/agent.enc`.
+
+Subsequent trades signed locally by the delegated agent — no browser, no popups. Wallet operations always re-prompt the browser.
+
+The agent is bounded on-chain to ~12 trade/AMM router selectors — it **cannot** withdraw, transfer to other wallets, change account managers, or approve other agents. Default expiry 30 days (`expiryDays` overrides, 1–365). Revoke via *"revoke my Boros agent"* (also a wallet-flow action).
+
+### Why this matters for client config
+
+- Server **must run as a long-lived child process** of the MCP client (which `claude mcp add` and the configs above all do). Not a one-shot RPC server — the in-memory `pendingActions` map is what makes the localhost callback safe (token → action lookup with TTL).
+- **Port is ephemeral** (OS-assigned per startup). Do not firewall a fixed port; do not expose. Server only binds `127.0.0.1`.
+- If your MCP client is sandboxed without browser/loopback access (e.g. remote container), wallet-signing tools will not work. Trading-only flows still function once an agent is provisioned from a non-sandboxed environment.
 
 ## Environment variables
 
-All optional — sensible defaults are baked in.
+All optional.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOROS_API_URL` | `https://api.boros.finance/open-api` | Boros REST API |
-| `BOROS_SEND_TXS_URL` | `https://api.boros.finance/send-txs-bot` | Tx submission endpoint |
-| `BOROS_MCP_PORT` | `3000` | Local server port (used for the wallet-approval browser flow) |
 | `ARBITRUM_RPC` | `https://arb1.arbitrum.io/rpc` | Arbitrum RPC endpoint |
+| `BOROS_MCP_PRETTY` | unset | Set to `1` to pretty-print JSON tool responses (debug; ~30–40% more tokens) |
 
 ## Security model
 
-- Agent key lives **only** on your machine, encrypted at rest under a scrypt-derived key
-- Wallet operations (deposit / withdraw) **never** use the agent key — they always re-prompt your real wallet in the browser
-- Trade calldata is verified against the simulated parameters before signing
-- The MCP server only listens on `localhost`; the browser approval pages POST results back to that local socket
+- Agent key lives **only** on your machine, encrypted at rest under a scrypt-derived key (optional password, AES-256-GCM)
+- Wallet operations (deposit / withdraw / agent setup / revoke / vault treasury) **never** use the agent key — always re-prompt your real wallet via the localhost callback
+- Trade calldata verified against the simulated parameters before signing (selector allowlist + intent verification)
+- Browser-callback transactions verified on-chain after submission: receipt status, target contract (`ROUTER_ADDRESS`), function selector (per-action allowlist), and signer address must all match. A malicious page cannot resolve a deposit by pointing at an unrelated successful tx.
+- HTTP server only listens on `127.0.0.1`, on an **OS-assigned ephemeral port** chosen fresh each launch (no stable port to bookmark or expose). The chosen URL is logged to stderr at startup and embedded in every signing-page link returned by tools.
+- One-time tokens scope each pending action (deposit, withdraw, agent approval, …) to a single browser callback. Tokens kept in memory only, invalidated on use or process exit.
 
-## Useful links
+## Links
 
 - Source & issues: <https://github.com/pendle-finance/boros-mcp>
 - Boros app: <https://boros.finance>
 - Pendle: <https://pendle.finance>
-- Model Context Protocol: <https://modelcontextprotocol.io>
+- MCP: <https://modelcontextprotocol.io>
 
 ## License
 

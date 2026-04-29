@@ -28,7 +28,8 @@ import {
 import {
   getMarketInfo,
   resolveMarketAcc,
-  resolveRecentOrderIds,
+  snapshotActiveOrderIds,
+  resolveRecentOrderIdsSinceSnapshot,
 } from './_market.js';
 import {
   executeAgentAction,
@@ -39,366 +40,393 @@ import {
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { withAuth } from '../_with-auth.js';
 
+const RESTING_TIFS = new Set(['GTC', 'ALO', 'SOFT_ALO']);
+
 export function registerBulkTools(server: McpServer) {
   server.registerTool(
     'place_orders',
     {
       annotations: { destructiveHint: true },
-      description: `Place N (max 100) independent single orders in one agent transaction. Advanced tier — exposes raw limitTick, absolute desiredRate, per-order ammId, and atomic preCancelOrderId. Use place_order for single-order UI flow (which simulates first); use place_ladders for orderbook-only bundled orders (cheaper gas, single bulkOrders call).
+      description: `ADVANCED — liquidity-provisioning / market-making batch placement. Places up to 100 heterogeneous order entries in ONE agent transaction (one signature, one txHash). Each entry is one of two kinds:
 
-NO PER-ENTRY SIMULATION: this tool does NOT call /v1/simulations/place-order before signing. For unfamiliar markets, call simulate_order on representative entries first, especially when |rate| is large or notional is small (backend enforces a $10 min order value).
+- kind:'single' — compiles to one on-chain placeSingleOrder call. Power-user controls: raw limitTick XOR human-readable rate; absolute desiredRate XOR relative slippage; per-entry ammId (0 = orderbook-only, n = AMM route); optional preCancelOrderId (atomic strict cancel-and-replace one resting id).
+- kind:'bulk' — compiles to one on-chain bulkOrders multicall covering N per-market sub-orders ('bulks[]'). Strictly orderbook (no AMM by construction). Per-bulk uniform side+tif, multi-tick sizes[]/limitTicks[], optional cancelData (multi-id atomic cancel-before-place; isAll wipes resting; isStrict reverts on missing id).
 
-Each order entry must belong to the same (root, accountId). Per entry:
-- Limit price (pick one, mutually exclusive): limitTick (raw contract tick) OR rate (DECIMAL APR; 0.085 = 8.5%). Required for limit TIFs (GTC/ALO/SOFT_ALO); optional for FOK/IOC.
-- Execution guard (pick one, mutually exclusive): desiredRate (absolute DECIMAL APR ceiling) OR slippage (relative from mid as DECIMAL). Optional for limit; recommended for market.
-- ammId: 0 = orderbook-only, specific AMM id = route through that AMM. Required.
+Use place_order (singular) for single-trade UI flow with simulate→execute. Prefer 'bulk' kind over many ammId:0 'single' entries — strictly cheaper gas (one bulkOrders multicall vs N placeSingleOrder calls) and supports multi-id cancelData.
 
-ALL entries land in ONE on-chain tryAggregate tx — every sub-call shares the same txHash. \`ok\` is true only when EVERY sub-call succeeded; inspect \`reverts[]\` for partials. preCancelOrderId is STRICT: the WHOLE BATCH reverts if a pre-cancel cannot be honored, even with atomic:false.`,
+NO PER-ENTRY SIMULATION: this tool does NOT call /v1/simulations/place-order before signing. Backend has no batch-sim endpoint. For unfamiliar markets, sim a representative entry via place_order mode:'simulate' first, especially when |rate| is large or notional is small (backend enforces a $10 min order value).
+
+Constraints:
+- All entries share one (root, accountId) — one agent signature covers the whole batch.
+- bulk entry with cross:false (isolated) must contain exactly one bulks[] element — isolated account is pinned to one marketId.
+- ALO/SOFT_ALO orders cannot route AMM — ammId is forced to 0 internally for those TIFs (single entries only).
+- preCancelOrderId is STRICT: the WHOLE BATCH reverts if a pre-cancel cannot be honored, even with atomic:false.
+- ALL entries land in ONE on-chain tryAggregate tx — every sub-call shares the same txHash. \`ok\` is true only when EVERY sub-call succeeded; inspect \`reverts[]\` for partials.`,
       inputSchema: {
-        orders: z
+        entries: z
           .array(
-            z.object({
-              marketId: marketIdField('Market ID'),
-              marginMode: marginModeField(),
-              side: sideSchema.describe('Order side (any case)'),
-              size: z.string().describe('Notional size in YU, human-readable decimal (e.g. "1000.5"). ALWAYS POSITIVE.'),
-              timeInForce: z.enum(['GTC', 'IOC', 'FOK', 'ALO', 'SOFT_ALO']).describe(TIME_IN_FORCE_DESCRIPTION),
-              limitTick: z.number().int().min(-32768).max(32767).optional().describe('Raw contract tick. Mutually exclusive with rate.'),
-              rate: z.number().optional().describe('APR as DECIMAL (0.085 = 8.5%, NOT 8.5). Mutually exclusive with limitTick. No upper bound — some markets have legitimately traded at |APR| > 100%.'),
-              desiredRate: z.number().optional().describe('Absolute execution ceiling as DECIMAL APR. Mutually exclusive with slippage.'),
-              slippage: z.number().min(0).max(1, 'slippage > 1 — DECIMAL: 0.05 = 5%, not 5').optional().describe('Relative tolerance from mid as DECIMAL (0.05 = 5%). Mutually exclusive with desiredRate.'),
-              ammId: ammIdField('AMM routing. 0 = orderbook-only; specific id = route that AMM. Required.'),
-              preCancelOrderId: z.string().optional().describe('Order id to atomically cancel before matching. STRICT: the WHOLE BATCH reverts if the pre-cancel cannot be honored, even with atomic:false.'),
-            }),
+            z.discriminatedUnion('kind', [
+              z.object({
+                kind: z.literal('single').describe("One placeSingleOrder call. Per-entry marketId, side, ammId, etc."),
+                marketId: marketIdField(),
+                marginMode: marginModeField(),
+                side: sideSchema.describe('Order side (any case)'),
+                size: z.string().describe('Notional size in YU, human-readable decimal (e.g. "1000.5"). ALWAYS POSITIVE.'),
+                timeInForce: z.enum(['GTC', 'IOC', 'FOK', 'ALO', 'SOFT_ALO']).describe(TIME_IN_FORCE_DESCRIPTION),
+                limitTick: z.number().int().min(-32768).max(32767).optional().describe('Raw contract tick. Mutually exclusive with rate.'),
+                rate: z.number().optional().describe('APR as DECIMAL (0.085 = 8.5%, NOT 8.5). Mutually exclusive with limitTick. Values exceeding max(1, |markApr|*5) on the entry\'s market require the top-level acknowledgeHighRate:true (e.g. an oil market trading at –117% accepts rate:1.2 freely; a 5%-mark USDT market rejects rate:5).'),
+                desiredRate: z.number().optional().describe('Absolute execution ceiling as DECIMAL APR. Mutually exclusive with slippage.'),
+                slippage: z.number().min(0).max(1, 'slippage > 1 — DECIMAL: 0.05 = 5%, not 5').optional().describe('Relative tolerance from mid as DECIMAL (0.05 = 5%). Mutually exclusive with desiredRate.'),
+                ammId: ammIdField(),
+                preCancelOrderId: z.string().optional().describe('Order id to atomically cancel before matching. STRICT: the WHOLE BATCH reverts if the pre-cancel cannot be honored, even with atomic:false.'),
+              }),
+              z.object({
+                kind: z.literal('bulk').describe('One bulkOrders multicall covering multi-market sub-orders. Orderbook-only (no AMM).'),
+                cross: z.boolean().describe('true → cross account; false → isolated. With cross:false, bulks[] must have exactly one element (isolated is pinned to one marketId).'),
+                bulks: z
+                  .array(
+                    z.object({
+                      marketId: marketIdField('Sub-order market.'),
+                      orders: z.object({
+                        side: sideSchema.describe('Side applied to every sub-order in this bulk (any case)'),
+                        sizes: z.array(z.string()).min(1).describe('Per-sub-order notional sizes (human-readable decimal).'),
+                        limitTicks: z.array(z.number().int()).min(1).describe('Per-sub-order raw tick indices. sizes.length === limitTicks.length'),
+                        timeInForce: z.enum(['GTC', 'IOC', 'FOK', 'ALO', 'SOFT_ALO']).describe('TIF applied to every sub-order in the bulk. ' + TIME_IN_FORCE_DESCRIPTION),
+                      }),
+                      cancelData: z
+                        .object({
+                          ids: z.array(z.string()).optional().describe('Order IDs to cancel. Ignored when isAll:true.'),
+                          isAll: z.boolean().describe('Cancel every resting order in this market. `ids` is ignored when true.'),
+                          isStrict: z.boolean().describe('Revert the whole bulkOrders call if any id cancel fails. MM default: false (best-effort).'),
+                        })
+                        .optional()
+                        .describe('Atomic cancel-before-place for this market. Omit to place without cancelling.'),
+                      desiredRate: z.number().optional().describe('Absolute execution ceiling for this bulk. Mutually exclusive with slippage.'),
+                      slippage: z.number().min(0).max(1, 'slippage > 1 — DECIMAL: 0.05 = 5%, not 5').optional().describe('Relative tolerance from mid for this bulk. Mutually exclusive with desiredRate.'),
+                    }),
+                  )
+                  .min(1)
+                  .describe('Per-market sub-order groups bundled into ONE bulkOrders contract call.'),
+              }),
+            ]),
           )
           .min(1)
           .max(100, 'place_orders supports at most 100 entries (send-txs-bot MAX_ALLOWED_BULK_DIRECT_CALL_SIZE).')
-          .describe('Array of independent single orders (max 100). Each entry becomes one placeSingleOrder contract call, all bundled under a single on-chain tryAggregate tx (one txHash for the whole batch).'),
-        atomic: z.boolean().default(true).describe('true (default): whole batch reverts if any order fails. false: best-effort — survivors execute independently, but `ok` is still false if ANY sub-call reverted (inspect `reverts[]`).'),
+          .describe('Heterogeneous batch of order entries (max 100). Each entry becomes one on-chain call (placeSingleOrder OR bulkOrders), all bundled under one tryAggregate tx.'),
+        atomic: z.boolean().default(true).describe('true (default): whole batch reverts if any entry fails. false: best-effort — survivors execute independently, but `ok` is still false if ANY sub-call reverted (inspect `reverts[]`).'),
+        acknowledgeHighRate: z.boolean().default(false).describe('Required when any single-entry `rate` exceeds max(1, |markApr|*5) for its market. The threshold scales with the market\'s current markApr — markets that already trade at extreme APR (oil at –117%, etc.) accept commensurate rates; markets near a normal range reject percent-vs-decimal typos like rate:5 (= 500%) on a 5%-mark book.'),
       },
     },
-    withAuth(async ({ orders, atomic }, { rootAddress }) => {
+    withAuth(async ({ entries, atomic, acknowledgeHighRate }, { rootAddress }) => {
       try {
         const accountId = DEFAULT_ACCOUNT_ID;
 
-        // Soft decimal-vs-percent warning per entry (|rate| > 1) — does not reject.
-        const limitAprWarnings: { index: number; warning: string }[] = [];
-        for (let i = 0; i < orders.length; i++) {
-          const o: any = orders[i];
-          const w = limitAprWarning(o.rate);
-          if (w) limitAprWarnings.push({ index: i, warning: w });
-        }
-
-        // V2 backend 400s without one of slippage/desiredRate. Tif-aware default:
-        // GTC/ALO/SOFT_ALO already gated by per-tick limitTick → slippage:1 (disabled);
-        // FOK/IOC takers need a real guard → reject pre-flight.
-        const slippageDefaulted: number[] = [];
-        for (let i = 0; i < orders.length; i++) {
-          const o: any = orders[i];
-          if (o.slippage === undefined && o.desiredRate === undefined) {
-            if (o.timeInForce === 'FOK' || o.timeInForce === 'IOC') {
+        for (let i = 0; i < entries.length; i++) {
+          const e: any = entries[i];
+          if (e.kind === 'single') {
+            if (e.slippage === undefined && e.desiredRate === undefined) {
+              if (e.timeInForce === 'FOK' || e.timeInForce === 'IOC') {
+                return errorContent(
+                  BorosErrorCode.INVALID_PARAMS,
+                  `entries[${i}] (single, ${e.timeInForce}): one of \`slippage\` or \`desiredRate\` is required for taker orders.`,
+                );
+              }
+            }
+          } else {
+            if (!e.cross && e.bulks.length > 1) {
               return errorContent(
                 BorosErrorCode.INVALID_PARAMS,
-                `orders[${i}] (${o.timeInForce}): one of \`slippage\` or \`desiredRate\` is required for taker orders. Pass slippage (e.g. 0.01 = 1%) or desiredRate (absolute APR ceiling).`,
+                `entries[${i}] (bulk, cross:false): isolated bulkOrders must contain exactly one bulks[] element — split into separate entries for each isolated market.`,
               );
             }
-            slippageDefaulted.push(i);
+            for (let j = 0; j < e.bulks.length; j++) {
+              const b: any = e.bulks[j];
+              if (b.desiredRate !== undefined && b.slippage !== undefined) {
+                return errorContent(
+                  BorosErrorCode.INVALID_PARAMS,
+                  `entries[${i}].bulks[${j}]: desiredRate and slippage are mutually exclusive.`,
+                );
+              }
+              if (b.orders.sizes.length !== b.orders.limitTicks.length) {
+                return errorContent(
+                  BorosErrorCode.INVALID_PARAMS,
+                  `entries[${i}].bulks[${j}]: sizes.length (${b.orders.sizes.length}) must equal limitTicks.length (${b.orders.limitTicks.length}).`,
+                );
+              }
+            }
           }
         }
 
-        const entries = await Promise.all(
-          orders.map(async (o: any, i: number) => {
-            const market = await getMarketInfo(o.marketId);
-            const tokenId: number = market.tokenId;
-            const marketAcc = resolveMarketAcc(rootAddress, accountId, tokenId, o.marginMode, o.marketId);
-            const sizeRaw = parseSize(o.size).toString();
-            const effectiveSlippage = o.slippage !== undefined
-              ? o.slippage
-              : (slippageDefaulted.includes(i) ? 1 : undefined);
-            // ALO/SOFT_ALO cannot route through AMM — backend strips ammId, so calldata
-            // and intent must agree on 0 to avoid a verifier mismatch.
-            const effectiveAmmId = (o.timeInForce === 'ALO' || o.timeInForce === 'SOFT_ALO') ? 0 : o.ammId;
-            return {
-              marketAcc,
-              marketId: o.marketId,
-              side: SIDE_MAP[o.side as keyof typeof SIDE_MAP],
-              size: sizeRaw,
-              tif: TIF_MAP[o.timeInForce as keyof typeof TIF_MAP],
-              ammId: effectiveAmmId,
-              ...(o.limitTick !== undefined ? { limitTick: o.limitTick } : {}),
-              ...(o.rate !== undefined ? { rate: o.rate } : {}),
-              ...(o.desiredRate !== undefined ? { desiredRate: o.desiredRate } : {}),
-              ...(effectiveSlippage !== undefined ? { slippage: effectiveSlippage } : {}),
-              ...(o.preCancelOrderId ? { preCancelOrderId: o.preCancelOrderId } : {}),
-            };
-          }),
-        );
+        // Per-entry typo gate scaled by each market's own markApr (e.g. oil at –117% accepts
+        // rate:1.2 without warning, while a 5% USDT-funding market rejects rate:5 = 500%).
+        const limitAprWarnings: { index: number; warning: string }[] = [];
+        const suspectEntries: { index: number; rate: number; markApr: number | undefined; floor: number }[] = [];
+        for (let i = 0; i < entries.length; i++) {
+          const e: any = entries[i];
+          if (e.kind !== 'single' || e.rate === undefined || !Number.isFinite(e.rate)) continue;
+          const w = limitAprWarning(e.rate);
+          if (w) limitAprWarnings.push({ index: i, warning: w });
+          let markApr: number | undefined;
+          try {
+            const m = await getMarketInfo(e.marketId);
+            // /v1/markets rows nest live stats under .data; tolerate flattened/legacy shapes too.
+            const raw = m?.data?.markApr ?? m?.markApr ?? m?.stats?.markApr;
+            if (typeof raw === 'number' && Number.isFinite(raw)) markApr = raw;
+          } catch { /* best-effort */ }
+          const floor = Math.max(1, Math.abs(markApr ?? 0) * 5);
+          if (Math.abs(e.rate) > floor) {
+            suspectEntries.push({ index: i, rate: e.rate, markApr, floor });
+          }
+        }
+        if (suspectEntries.length > 0 && !acknowledgeHighRate) {
+          return errorContent(
+            BorosErrorCode.INVALID_PARAMS,
+            `${suspectEntries.length} single entry(ies) exceed the markApr-scaled rate floor (likely percent-vs-decimal typo). ` +
+              `Re-call with acknowledgeHighRate:true to confirm, or divide each rate by 100. Offenders: ` +
+              suspectEntries
+                .map(
+                  (s) =>
+                    `entries[${s.index}] rate=${s.rate} (markApr=${s.markApr === undefined ? 'unknown' : `${(s.markApr * 100).toFixed(2)}%`}, floor=${(s.floor * 100).toFixed(0)}%)`,
+                )
+                .join('; ') +
+              '.',
+          );
+        }
 
-        // /place-orders shape: each entry is { singleOrder? | bulkOrders? } (exactly one).
-        // place_orders sends only singleOrder; place_ladders sends one bulkOrders.
+        const slippageDefaultedSingles: number[] = [];
+        const orderRequests: any[] = [];
+        const intents: IntentExpectation[] = [];
+
+        for (let i = 0; i < entries.length; i++) {
+          const e: any = entries[i];
+
+          if (e.kind === 'single') {
+            const market = await getMarketInfo(e.marketId);
+            const tokenId: number = market.tokenId;
+            const marketAcc = resolveMarketAcc(rootAddress, accountId, tokenId, e.marginMode, e.marketId);
+            const sizeRaw = parseSize(e.size).toString();
+            // GTC/ALO/SOFT_ALO already gated by per-tick limitTick → slippage:1 (disabled);
+            // FOK/IOC takers required a real guard above.
+            let effectiveSlippage = e.slippage;
+            if (effectiveSlippage === undefined && e.desiredRate === undefined) {
+              effectiveSlippage = 1;
+              slippageDefaultedSingles.push(i);
+            }
+            // ALO/SOFT_ALO cannot route AMM — backend strips ammId, calldata + intent must agree on 0.
+            const effectiveAmmId = (e.timeInForce === 'ALO' || e.timeInForce === 'SOFT_ALO') ? 0 : e.ammId;
+
+            const singleOrder: any = {
+              marketAcc,
+              marketId: e.marketId,
+              side: SIDE_MAP[e.side as keyof typeof SIDE_MAP],
+              size: sizeRaw,
+              tif: TIF_MAP[e.timeInForce as keyof typeof TIF_MAP],
+              ammId: effectiveAmmId,
+              ...(e.limitTick !== undefined ? { limitTick: e.limitTick } : {}),
+              ...(e.rate !== undefined ? { rate: e.rate } : {}),
+              ...(e.desiredRate !== undefined ? { desiredRate: e.desiredRate } : {}),
+              ...(effectiveSlippage !== undefined ? { slippage: effectiveSlippage } : {}),
+              ...(e.preCancelOrderId ? { preCancelOrderId: e.preCancelOrderId } : {}),
+            };
+            orderRequests.push({ singleOrder });
+
+            const sizeForIntent = tryBigInt(sizeRaw);
+            // Pin marketId+cross (not marketAcc) — see place_order.
+            intents.push({
+              selector: ROUTER_SELECTORS.placeSingleOrder,
+              marketId: e.marketId,
+              cross: e.marginMode !== 'isolated',
+              side: e.side,
+              tif: TIF_MAP[e.timeInForce as keyof typeof TIF_MAP],
+              ammId: effectiveAmmId,
+              ...(sizeForIntent !== undefined ? { sizeAbs: sizeForIntent } : {}),
+              ...(typeof e.limitTick === 'number' ? { tickExact: e.limitTick } : {}),
+            });
+          } else {
+            const bulks = e.bulks.map((b: any) => {
+              const cancelData = b.cancelData
+                ? {
+                    ids: b.cancelData.ids ?? [],
+                    isAll: b.cancelData.isAll,
+                    isStrict: b.cancelData.isStrict,
+                  }
+                : { ids: [], isAll: false, isStrict: false };
+              const guard =
+                b.desiredRate !== undefined
+                  ? { desiredRate: b.desiredRate }
+                  : b.slippage !== undefined
+                    ? { slippage: b.slippage }
+                    : { slippage: 1 };
+              return {
+                marketId: b.marketId,
+                cancelData,
+                orders: {
+                  side: SIDE_MAP[b.orders.side as keyof typeof SIDE_MAP],
+                  sizes: b.orders.sizes.map((s: string) => parseSize(s).toString()),
+                  limitTicks: b.orders.limitTicks,
+                  tif: TIF_MAP[b.orders.timeInForce as keyof typeof TIF_MAP],
+                },
+                ...guard,
+              };
+            });
+            orderRequests.push({ bulkOrders: { accountId, cross: e.cross, bulks } });
+
+            const allMarketIds = e.bulks.map((b: any) => b.marketId);
+            const allSides = e.bulks.map((b: any) => b.orders.side);
+            const allTifs = e.bulks.map((b: any) => b.orders.timeInForce);
+            const uniformMarketId = allMarketIds.every((m: number) => m === allMarketIds[0]) ? allMarketIds[0] : undefined;
+            const uniformSide = allSides.every((s: string) => s === allSides[0]) ? allSides[0] : undefined;
+            const uniformTif = allTifs.every((t: string) => t === allTifs[0]) ? allTifs[0] : undefined;
+
+            const allTicks: number[] = e.bulks.flatMap((b: any) => b.orders.limitTicks as number[]);
+            const tickMin = allTicks.length ? Math.min(...allTicks) : undefined;
+            const tickMax = allTicks.length ? Math.max(...allTicks) : undefined;
+
+            const allSizes: bigint[] = e.bulks.flatMap((b: any) =>
+              b.orders.sizes.map((s: string) => parseSize(s)),
+            );
+            const sizeMin = allSizes.length ? allSizes.reduce((a, b) => (b < a ? b : a)) : undefined;
+            const sizeMax = allSizes.length ? allSizes.reduce((a, b) => (b > a ? b : a)) : undefined;
+
+            intents.push({
+              selector: ROUTER_SELECTORS.bulkOrders,
+              cross: e.cross,
+              ...(uniformMarketId !== undefined ? { marketId: uniformMarketId } : {}),
+              ...(uniformSide !== undefined ? { side: uniformSide } : {}),
+              ...(uniformTif !== undefined ? { tif: TIF_MAP[uniformTif as keyof typeof TIF_MAP] } : {}),
+              ...(tickMin !== undefined ? { tickMin } : {}),
+              ...(tickMax !== undefined ? { tickMax } : {}),
+              ...(sizeMin !== undefined ? { sizeMin } : {}),
+              ...(sizeMax !== undefined ? { sizeMax } : {}),
+            });
+          }
+        }
+
         const calldataRes = await fetchWithRetry(() =>
-          openApiPost('/v1/calldata-builder/agent/place-orders', {
-            orderRequests: entries.map((e: any) => ({ singleOrder: e })),
-          }),
+          openApiPost('/v1/calldata-builder/agent/place-orders', { orderRequests }),
         );
         const calldatas = extractCalldatas(calldataRes);
-        // Translate numeric wire side → MCP label for human-readable echo.
-        const resolved = (calldataRes.calls ?? []).map((c: any) => {
+        const resolved = (calldataRes.calls ?? []).map((c: any, i: number) => {
           const r = c.resolved;
-          if (!r || typeof r !== 'object') return r;
-          const sideLabel = sideLabelFromWire(r.side);
-          return sideLabel !== undefined ? { ...r, side: sideLabel } : r;
+          if (r && typeof r === 'object') {
+            const sideLabel = sideLabelFromWire(r.side);
+            return sideLabel !== undefined ? { ...r, side: sideLabel } : r;
+          }
+          // Backend returns resolved:null for bulk entries — synthesize from inputs so the caller
+          // doesn't have to round-trip get_limit_orders to confirm what was encoded.
+          const e: any = entries[i];
+          if (e?.kind === 'bulk') {
+            return {
+              kind: 'bulk',
+              cross: e.cross,
+              bulks: (e.bulks as any[]).map((b) => ({
+                marketId: b.marketId,
+                side: b.orders.side,
+                tif: b.orders.timeInForce,
+                orders: b.orders.sizes.map((sz: string, idx: number) => ({
+                  subIndex: idx,
+                  sizeYU: sz,
+                  limitTick: b.orders.limitTicks[idx],
+                })),
+                ...(b.cancelData ? { cancelData: b.cancelData } : {}),
+              })),
+            };
+          }
+          return r;
         });
 
-        // Per-entry placeSingleOrder intent. No tick pin on rate path (rate→tick rounding LONG↓/SHORT↑).
-        const placeOrdersIntents: IntentExpectation[] = entries.map((e: any, i: number) => {
-          const sizeForIntent = tryBigInt(e.size);
-          const o: any = orders[i];
-          // Pin marketId+cross (not marketAcc) — see place_order.
-          const intent: IntentExpectation = {
-            selector: ROUTER_SELECTORS.placeSingleOrder,
-            marketId: e.marketId,
-            cross: o.marginMode !== 'isolated',
-            side: o.side,
-            tif: TIF_MAP[o.timeInForce as keyof typeof TIF_MAP],
-            ammId: e.ammId,
-            ...(sizeForIntent !== undefined ? { sizeAbs: sizeForIntent } : {}),
-            ...(typeof o.limitTick === 'number' ? { tickExact: o.limitTick } : {}),
-          };
-          return intent;
-        });
+        // Pre-snapshot resting orders per marketId — covers both kinds.
+        // single resting → +1 per market; bulk resting → +sizes.length per market.
+        const restingCountByMarket = new Map<number, number>();
+        for (const e of entries as any[]) {
+          if (e.kind === 'single') {
+            if (RESTING_TIFS.has(e.timeInForce)) {
+              restingCountByMarket.set(e.marketId, (restingCountByMarket.get(e.marketId) ?? 0) + 1);
+            }
+          } else {
+            for (const b of e.bulks as any[]) {
+              if (RESTING_TIFS.has(b.orders.timeInForce)) {
+                restingCountByMarket.set(
+                  b.marketId,
+                  (restingCountByMarket.get(b.marketId) ?? 0) + b.orders.sizes.length,
+                );
+              }
+            }
+          }
+        }
+        const preSnapshotByMarket = new Map<number, Set<string>>();
+        await Promise.all(
+          [...restingCountByMarket.keys()].map(async (mid) => {
+            preSnapshotByMarket.set(
+              mid,
+              await snapshotActiveOrderIds(rootAddress, accountId, mid),
+            );
+          }),
+        );
 
-        // Pin selector — allowing bulkOrders would let a compromised open-api swap to bundled payload.
         const result = await executeAgentAction(
           calldatas,
           rootAddress,
           accountId,
-          ['placeSingleOrder'],
-          { atomic, intents: placeOrdersIntents },
+          ['placeSingleOrder', 'bulkOrders'],
+          { atomic, intents },
         );
 
         const status = analyzeExecution(result);
-        if (atomic && status.revertCount > 0) {
+        const allReverted = status.entries.length > 0 && status.revertCount === status.entries.length;
+        if ((atomic && status.revertCount > 0) || allReverted) {
           const execErr = executionErrorContent('place_orders', result);
           if (execErr) return execErr;
         }
 
-        // GTC/ALO/SOFT_ALO only — best-effort orderId lookup grouped by marketId.
-        const restingByMarket = new Map<number, number>();
-        for (const o of orders) {
-          if (o.timeInForce === 'GTC' || o.timeInForce === 'ALO' || o.timeInForce === 'SOFT_ALO') {
-            restingByMarket.set(o.marketId, (restingByMarket.get(o.marketId) ?? 0) + 1);
-          }
-        }
         const orderIdsByMarket: Record<number, string[]> = {};
         await Promise.all(
-          [...restingByMarket.entries()].map(async ([mid, n]) => {
-            const ids = await resolveRecentOrderIds(rootAddress, accountId, mid, n);
+          [...restingCountByMarket.entries()].map(async ([mid, n]) => {
+            const pre = preSnapshotByMarket.get(mid) ?? new Set<string>();
+            const ids = await resolveRecentOrderIdsSinceSnapshot(rootAddress, accountId, mid, pre, n);
             if (ids && ids.length) orderIdsByMarket[mid] = ids;
           }),
         );
 
         const txHash = extractTxHash(result);
 
+        const entryKindCounts = entries.reduce(
+          (acc: { single: number; bulk: number }, e: any) => {
+            acc[e.kind as 'single' | 'bulk']++;
+            return acc;
+          },
+          { single: 0, bulk: 0 },
+        );
+        const totalSubOrders = (entries as any[]).reduce((acc, e) => {
+          if (e.kind === 'single') return acc + 1;
+          return acc + e.bulks.reduce((s: number, b: any) => s + b.orders.sizes.length, 0);
+        }, 0);
+
         return jsonResult({
           ok: status.revertCount === 0,
           action: 'place_orders',
           ...(txHash ? { txHash } : {}),
-          orderCount: orders.length,
+          entryCount: entries.length,
+          entryKindCounts,
+          totalSubOrders,
           atomic,
           resolved,
           ...(limitAprWarnings.length > 0 ? { limitAprWarnings } : {}),
-          ...(slippageDefaulted.length > 0
-            ? { slippageDefaulted, slippageDefaultedNote: 'Indices got slippage:1 (effectively disabled) because no slippage/desiredRate was provided. Per-tick limitTick still gates fills for resting orders, so this is safe for GTC/ALO/SOFT_ALO.' }
+          ...(slippageDefaultedSingles.length > 0
+            ? {
+                slippageDefaultedSingles,
+                slippageDefaultedNote:
+                  'Indicated single entries got slippage:1 (effectively disabled) because no slippage/desiredRate was provided. Per-tick limitTick still gates fills for resting orders, so this is safe for GTC/ALO/SOFT_ALO.',
+              }
             : {}),
           ...(Object.keys(orderIdsByMarket).length > 0 ? { orderIdsByMarket } : {}),
           ...(status.revertCount > 0 ? { reverts: status.reverts } : {}),
           execution: result,
           _context: {
             apr: APR_NOTE,
-            resolved: 'Per-order echo of tick/rate/desiredRate actually encoded.',
-            orderIdsByMarket: 'Newly-placed resting orderIds, grouped by marketId. Best-effort — may be empty under concurrent placements.',
+            resolved: 'Per-call echo of tick/rate/desiredRate actually encoded.',
+            orderIdsByMarket: 'Newly-placed resting orderIds, grouped by marketId. Diff of active-orders set before vs. after the tx — automatically filters out preCancelOrderId / cancelData targets and unrelated resting orders. May be empty under heavy concurrent placements.',
             okSemantics: '`ok` is true only if every sub-call succeeded. atomic:false partial reverts still flip ok:false; inspect `reverts[]`.',
-          },
-        });
-      } catch (err) {
-        return catchToErrorContent(err);
-      }
-    }),
-  );
-
-  server.registerTool(
-    'place_ladders',
-    {
-      annotations: { destructiveHint: true },
-      description: `Place N orderbook-only orders bundled into a single on-chain bulkOrders call. AMM is skipped by construction — strictly cheaper than place_orders with ammId:0 on every entry. Two main use cases:
-1. MM ladder refresh — cancelData per market atomically cancels stale resting orders and places fresh ones at multiple tick levels (uniform side+tif per ladder).
-2. Gas-efficient taker batch — N orderbook-only orders as single-order ladders (sizes:[x], limitTicks:[y]).
-
-Constraints:
-- cross:false (isolated) pins the account to the first ladder's marketId — send one ladder per request.
-- cross:true lets multiple markets share the same tokenId in one request.
-- No AMM routing, no per-order preCancelOrderId, no inline isolated cash moves. Use place_order / place_orders for those.`,
-      inputSchema: {
-        cross: z.boolean().describe('true → cross account; false → isolated (pinned to first ladder\'s marketId).'),
-        ladders: z
-          .array(
-            z.object({
-              marketId: z.number().int().describe('Market ID for this ladder'),
-              orders: z.object({
-                side: sideSchema.describe('Side applied to every order in this ladder (any case)'),
-                sizes: z.array(z.string()).min(1).describe('Per-order notional sizes in human-readable decimal'),
-                limitTicks: z.array(z.number().int()).min(1).describe('Per-order raw tick indices. sizes.length === limitTicks.length'),
-                timeInForce: z.enum(['GTC', 'IOC', 'FOK', 'ALO', 'SOFT_ALO']).describe('TIF applied to every order in the ladder. ' + TIME_IN_FORCE_DESCRIPTION),
-              }),
-              cancelData: z
-                .object({
-                  ids: z.array(z.string()).optional().describe('Order IDs to cancel. Ignored when isAll:true.'),
-                  isAll: z.boolean().describe('Cancel every resting order in this market. `ids` is ignored when true.'),
-                  isStrict: z.boolean().describe('Revert the whole ladder call if any id cancel fails. MM default: false (best-effort).'),
-                })
-                .optional()
-                .describe('Atomic cancel-before-place for this market. Omit to place without cancelling.'),
-              desiredRate: z.number().optional().describe('Absolute execution ceiling for this ladder. Strongly recommended when any FOK is present.'),
-            }),
-          )
-          .min(1)
-          .describe('Per-market ladder entries. One contract call per entry (all bundled into one bulkOrders tx).'),
-        atomic: z.boolean().default(true).describe('true (default): whole bulkOrders tx reverts if any ladder fails. false: best-effort — survivors execute independently. MM workflows usually want false to tolerate a single stale-id revert.'),
-      },
-    },
-    withAuth(async ({ cross, ladders, atomic }, { rootAddress }) => {
-      try {
-        const accountId = DEFAULT_ACCOUNT_ID;
-
-        // cross:false pins whole call to first ladder's marketId (contract limit) — reject 2nd ladder
-        // pre-flight to avoid silent misroute to first marketAcc.
-        if (!cross && ladders.length > 1) {
-          return errorContent(
-            BorosErrorCode.INVALID_PARAMS,
-            'place_ladders with cross:false must contain exactly one ladder — send separate calls for each isolated market.',
-          );
-        }
-
-        // Folds ladder bundle into one bulkOrders entry under /place-orders.
-        // cancelData is required per bulk (default empty/non-strict).
-        // Bulk requires one of desiredRate/slippage — default slippage:1 (disabled) to avoid 400.
-        const bulks = ladders.map((l: any) => {
-          const cancelData = l.cancelData
-            ? {
-                ids: l.cancelData.ids ?? [],
-                isAll: l.cancelData.isAll,
-                isStrict: l.cancelData.isStrict,
-              }
-            : { ids: [], isAll: false, isStrict: false };
-          const guard =
-            l.desiredRate !== undefined
-              ? { desiredRate: l.desiredRate }
-              : { slippage: 1 };
-          return {
-            marketId: l.marketId,
-            cancelData,
-            orders: {
-              side: SIDE_MAP[l.orders.side as keyof typeof SIDE_MAP],
-              sizes: l.orders.sizes.map((s: string) => parseSize(s).toString()),
-              limitTicks: l.orders.limitTicks,
-              tif: TIF_MAP[l.orders.timeInForce as keyof typeof TIF_MAP],
-            },
-            ...guard,
-          };
-        });
-
-        const body = {
-          orderRequests: [
-            {
-              bulkOrders: {
-                accountId,
-                cross,
-                bulks,
-              },
-            },
-          ],
-        };
-
-        const calldataRes = await fetchWithRetry(() =>
-          openApiPost('/v1/calldata-builder/agent/place-orders', body),
-        );
-        const calldatas = extractCalldatas(calldataRes);
-
-        // bulkOrders: backend bundles ladders into one calldata. Pin uniform marketId/side/tif when possible
-        // and size/tick min/max envelope across all bulks (false-positive safe).
-        const allMarketIds = ladders.map((l: any) => l.marketId);
-        const allSides = ladders.map((l: any) => l.orders.side);
-        const allTifs = ladders.map((l: any) => l.orders.timeInForce);
-        const uniformMarketId = allMarketIds.every((m: number) => m === allMarketIds[0]) ? allMarketIds[0] : undefined;
-        const uniformSide = allSides.every((s: string) => s === allSides[0]) ? allSides[0] : undefined;
-        const uniformTif = allTifs.every((t: string) => t === allTifs[0]) ? allTifs[0] : undefined;
-
-        const allTicks: number[] = ladders.flatMap((l: any) => l.orders.limitTicks as number[]);
-        const tickMin = allTicks.length ? Math.min(...allTicks) : undefined;
-        const tickMax = allTicks.length ? Math.max(...allTicks) : undefined;
-
-        const allSizes: bigint[] = ladders.flatMap((l: any) =>
-          l.orders.sizes.map((s: string) => parseSize(s)),
-        );
-        const sizeMin = allSizes.length ? allSizes.reduce((a, b) => (b < a ? b : a)) : undefined;
-        const sizeMax = allSizes.length ? allSizes.reduce((a, b) => (b > a ? b : a)) : undefined;
-
-        const ladderIntent: IntentExpectation = {
-          selector: ROUTER_SELECTORS.bulkOrders,
-          cross,
-
-          ...(uniformMarketId !== undefined ? { marketId: uniformMarketId } : {}),
-          ...(uniformSide !== undefined ? { side: uniformSide } : {}),
-          ...(uniformTif !== undefined ? { tif: TIF_MAP[uniformTif as keyof typeof TIF_MAP] } : {}),
-          ...(tickMin !== undefined ? { tickMin } : {}),
-          ...(tickMax !== undefined ? { tickMax } : {}),
-          ...(sizeMin !== undefined ? { sizeMin } : {}),
-          ...(sizeMax !== undefined ? { sizeMax } : {}),
-        };
-
-        const result = await executeAgentAction(
-          calldatas,
-          rootAddress,
-          accountId,
-          ['bulkOrders'],
-          { atomic, intents: [ladderIntent] },
-        );
-
-        // EXECUTION_REVERTED on: atomic:true with any revert OR atomic:false fully-reverted.
-        const status = analyzeExecution(result);
-        const allReverted = status.entries.length > 0 && status.revertCount === status.entries.length;
-        if ((atomic && status.revertCount > 0) || allReverted) {
-          const execErr = executionErrorContent('place_ladders', result);
-          if (execErr) return execErr;
-        }
-
-        const orderIdsByMarket: Record<number, string[]> = {};
-        await Promise.all(
-          ladders.map(async (l: any) => {
-            const tif = l.orders.timeInForce;
-            if (tif !== 'GTC' && tif !== 'ALO' && tif !== 'SOFT_ALO') return;
-            const ids = await resolveRecentOrderIds(rootAddress, accountId, l.marketId, l.orders.sizes.length);
-            if (ids && ids.length) orderIdsByMarket[l.marketId] = ids;
-          }),
-        );
-
-        const txHash = extractTxHash(result);
-
-        return jsonResult({
-          ok: status.revertCount === 0,
-          action: 'place_ladders',
-          ...(txHash ? { txHash } : {}),
-          cross,
-          ladderCount: ladders.length,
-          totalOrders: ladders.reduce((acc: number, l: any) => acc + l.orders.sizes.length, 0),
-          atomic,
-          ...(Object.keys(orderIdsByMarket).length > 0 ? { orderIdsByMarket } : {}),
-          ...(status.revertCount > 0 ? { reverts: status.reverts } : {}),
-          execution: result,
-          _context: {
-            apr: APR_NOTE,
-            note: 'All ladders bundled into one on-chain bulkOrders call. Orderbook-only (no AMM).',
           },
         });
       } catch (err) {

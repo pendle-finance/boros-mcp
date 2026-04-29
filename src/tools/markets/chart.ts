@@ -1,11 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
 import { openApiGet } from '../../api/open-api.js';
 import { jsonResult, enrichTimestamp } from '../../utils.js';
 import {
   marketIdField,
   timeFrameField,
   unixTimestampFieldOptional,
+  paginationLimitField,
   TIMEFRAME_SECONDS,
 } from '../_schemas.js';
 import { catchToErrorContent } from '../../agent/errors.js';
@@ -14,26 +14,29 @@ import { fetchAllMarkets } from '../_shared/fetch-all-markets.js';
 
 export function registerMarketsChartTools(server: McpServer): void {
   server.registerTool(
-    'get_chart',
+    'get_market_ohlcv',
     {
       annotations: { readOnlyHint: true },
       description: `Get OHLCV candlestick chart data for a market. Candles are built from EXECUTED TRADES (last-traded APR), not the mark rate, AMM implied rate, or oracle funding rate. OHLC values are APR DECIMALS (0.05 = 5%), not prices.
 Use this for trade-rate trend analysis. Empty buckets are FORWARD-FILLED with the previous close and volume=0; those rows are flagged with synthetic=true so an LLM doesn't read them as low-volatility periods.
 Do NOT use this for individual trade details — use get_market_trades instead.
-For indicator overlays (underlying APR, future premium, fear & greed, funding-rate MAs), use get_market_indicators. The backend caps requests at 200 candles regardless of range.`,
+For indicator overlays (underlying APR, future premium, fear & greed, funding-rate MAs), use get_market_indicators.
+Pagination (max 50 candles per call): to fetch older history, set endTimestamp = (oldest timestamp from prior page) - 1 and either pass startTimestamp = endTimestamp - 50 * timeFrameSeconds, or omit startTimestamp and the backend returns up to 50 candles ending at endTimestamp. Timeframe seconds: 5m=300, 1h=3600, 1d=86400, 1w=604800.`,
       inputSchema: {
-        marketId: marketIdField('The numeric market ID'),
+        marketId: marketIdField(),
         timeFrame: timeFrameField({ defaultValue: '1h' }),
-        limit: z.number().int().min(1).max(200).default(50).describe(
-          'Number of most recent candles to return (default 50, max 200 — the backend hard cap). Ignored when startTimestamp is provided.',
-        ),
+        limit: paginationLimitField({
+          max: 50,
+          defaultValue: 50,
+          desc: 'Number of candles to return (default 50, max 50). Ignored when startTimestamp is provided. To page beyond 50, use endTimestamp; see tool description.',
+        }),
         startTimestamp: unixTimestampFieldOptional(
           'startTimestamp',
-          'Start timestamp (Unix seconds; not milliseconds). The backend silently clamps the range to the latest 200 candles.',
+          'Start timestamp (Unix seconds; not milliseconds). When paging older history, set startTimestamp = endTimestamp - 50 * timeFrameSeconds.',
         ),
         endTimestamp: unixTimestampFieldOptional(
           'endTimestamp',
-          'End timestamp (Unix seconds). Silently clamped to "now" if in the future.',
+          'End timestamp (Unix seconds). Silently clamped to "now" if in the future. Set to (oldest timestamp from prior page) - 1 to page backwards.',
         ),
       },
     },
@@ -83,14 +86,14 @@ For indicator overlays (underlying APR, future premium, fear & greed, funding-ra
           ...(marketName ? { marketName } : {}),
           marketSymbol,
           timeFrame,
-          volumeUnit: 'USD',
+          volumeUnit: 'YU',
           count: candles.length,
           ...(truncated ? { truncated: true, backendCap: 200 } : {}),
           ...(syntheticCount > 0 ? { syntheticCount } : {}),
           results: candles,
           _context: {
             ohlc: 'Open/High/Low/Close are LAST-TRADED APR values (annualized decimal), NOT prices, mark rate, or oracle funding. 0.05 = 5% APR.',
-            volume: 'Trading volume in USD',
+            volume: 'Trading volume in YU (yield units, sum of |trade.size| in the bucket). Multiply by the collateral asset `usdPrice` from `get_assets` for approximate USD notional.',
             synthetic: 'Rows with synthetic=true are forward-filled by the backend for buckets with no trades (volume=0, OHLC equal to the previous close). Treat as "no data", not as a flat-volatility period.',
             cap: 'Backend caps the response at 200 candles regardless of the requested range; older data falls off the front.',
           },
