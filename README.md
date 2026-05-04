@@ -31,17 +31,23 @@ cd boros-mcp && yarn install && yarn build
 
 ## Configure your client
 
-Server speaks MCP over **stdio**.
+The server speaks MCP over **stdio**, so any compliant client can launch it. Pick the one you use.
 
-**Claude Code** (one command):
+### Claude Code
+
+One command (recommended):
 
 ```bash
 claude mcp add boros -- npx -y @pendle/boros-mcp@beta
 ```
 
-Add `--scope user` for global. Verify: `claude mcp list`.
+Add `--scope user` for global (all projects) instead of the default project scope. Verify with `claude mcp list`.
 
-**Claude Desktop / Gemini CLI / opencode / others** — add the canonical config:
+### Claude Desktop
+
+Edit `claude_desktop_config.json`:
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
@@ -54,17 +60,11 @@ Add `--scope user` for global. Verify: `claude mcp list`.
 }
 ```
 
-Config file location:
+Restart the app to load the server.
 
-| Client | Path |
-|---|---|
-| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
-| Gemini CLI | `~/.gemini/settings.json` |
-| Codex CLI | `~/.codex/config.toml` (TOML, see below) |
-| opencode | `~/.config/opencode/opencode.json` (wrap under `"mcp"`, set `"type": "local"`) |
+### Codex CLI
 
-Codex CLI (TOML):
+Edit `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.boros]
@@ -72,14 +72,50 @@ command = "npx"
 args = ["-y", "@pendle/boros-mcp@beta"]
 ```
 
-**From source** — replace the command block with:
+### Gemini CLI
+
+Edit `~/.gemini/settings.json` (or your project's `.gemini/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "boros": {
+      "command": "npx",
+      "args": ["-y", "@pendle/boros-mcp@beta"]
+    }
+  }
+}
+```
+
+### opencode
+
+Edit `~/.config/opencode/opencode.json` (or `opencode.json` at the project root):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "boros": {
+      "type": "local",
+      "command": ["npx", "-y", "@pendle/boros-mcp@beta"],
+      "enabled": true
+    }
+  }
+}
+```
+
+### Built from source
+
+Replace the `command`/`args` block in any of the configs above with:
 
 ```json
 "command": "node",
 "args": ["/absolute/path/to/boros-mcp/dist/index.js"]
 ```
 
-Restart the client to load the server.
+### Other MCP clients
+
+Run `npx -y @pendle/boros-mcp@beta` (or `boros-mcp` if globally installed) and point your client at it over stdio transport.
 
 ## How approvals work — read this first
 
