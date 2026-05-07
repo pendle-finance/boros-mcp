@@ -1,3 +1,6 @@
+import { getRateAtTick } from '../../chain/tick-math.js';
+import { DEFAULT_SLIPPAGE } from '../../config.js';
+
 // TIF wire codes for Router (OrderInput.tif) + open-api `tif` field. MCP uses strings; translate at boundary.
 export const TIF_MAP = {
   GTC: 0,
@@ -6,6 +9,9 @@ export const TIF_MAP = {
   ALO: 3,
   SOFT_ALO: 4,
 } as const;
+
+// For these TIFS, slippage is silently ignored. limitApr/limitTick is the only effective guard.
+export const RESTING_TIFS: ReadonlySet<TifStr> = new Set(['GTC', 'ALO', 'SOFT_ALO']);
 
 export type TifWireCode = (typeof TIF_MAP)[keyof typeof TIF_MAP];
 
@@ -50,6 +56,22 @@ export function flipSideString(side: SideStr): SideStr {
       throw err;
     }
   }
+}
+
+export function computeDefaultSlippage(market: any): number {
+  const factor = market?.config?.maxRateDeviationFactorBase1e4;
+  const tickStep = market?.imData?.tickStep;
+  const iTickThresh = market?.imData?.iTickThresh;
+  const markAprRaw = market?.data?.markApr ?? market?.markApr ?? market?.stats?.markApr;
+  const markApr = typeof markAprRaw === 'number' && Number.isFinite(markAprRaw) ? markAprRaw : 0;
+  if (typeof factor !== 'number' || typeof tickStep !== 'number' || typeof iTickThresh !== 'number') {
+    return DEFAULT_SLIPPAGE;
+  }
+  const iTickThreshRate = getRateAtTick(BigInt(iTickThresh), BigInt(tickStep));
+  const maxDeviation = (factor / 10000) * Math.max(iTickThreshRate, Math.abs(markApr));
+  const maxDeviationRounded = Math.floor(maxDeviation * 1000) / 1000;
+  const half = 0.5 * maxDeviationRounded;
+  return half > 0 ? half : DEFAULT_SLIPPAGE;
 }
 
 // Soft "did you mean 0.05 instead of 5?" hint when limitApr looks like a percent (|x|>1).

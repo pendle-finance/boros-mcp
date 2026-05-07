@@ -1,6 +1,5 @@
 // Shared Zod field factories — validation rules locked here so error messages stay consistent across tools.
 import { z } from 'zod';
-import { DEFAULT_SLIPPAGE } from '../config.js';
 import { ADDRESS_REGEX, MARKET_ACC_REGEX, type FilterCondition } from '../utils.js';
 
 export type { FilterCondition };
@@ -94,8 +93,13 @@ export function slippageField(notes?: string) {
     .number()
     .min(0, 'slippage cannot be negative')
     .max(1, 'slippage > 1 — DECIMAL (0.05 = 5%), not 5')
-    .default(DEFAULT_SLIPPAGE)
-    .describe(appendNotes('Max slippage as DECIMAL (0.05 = 5%, NOT 5).', notes));
+    .optional()
+    .describe(
+      appendNotes(
+        'Max slippage as DECIMAL (0.05 = 5%, NOT 5). Effective only for FOK market orders — backend silently ignores it for GTC/ALO/SOFT_ALO (those are guarded by limitApr/limitTick instead). If omitted, defaults per-market to 0.5 × market.maxRateDeviation (scales with markApr volatility), falling back to 5% only if market config is missing.',
+        notes,
+      ),
+    );
 }
 
 export function marginModeField(notes?: string) {

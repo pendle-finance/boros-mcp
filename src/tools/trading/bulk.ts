@@ -24,6 +24,8 @@ import {
   sideLabelFromWire,
   tryBigInt,
   limitAprWarning,
+  computeDefaultSlippage,
+  RESTING_TIFS,
 } from './_helpers.js';
 import {
   getMarketInfo,
@@ -40,7 +42,6 @@ import {
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { withAuth } from '../_with-auth.js';
 
-const RESTING_TIFS = new Set(['GTC', 'ALO', 'SOFT_ALO']);
 
 export function registerBulkTools(server: McpServer) {
   server.registerTool(
@@ -61,7 +62,9 @@ Constraints:
 - bulk entry with cross:false (isolated) must contain exactly one bulks[] element — isolated account is pinned to one marketId.
 - ALO/SOFT_ALO orders cannot route AMM — ammId is forced to 0 internally for those TIFs (single entries only).
 - preCancelOrderId is STRICT: the WHOLE BATCH reverts if a pre-cancel cannot be honored, even with atomic:false.
-- ALL entries land in ONE on-chain tryAggregate tx — every sub-call shares the same txHash. \`ok\` is true only when EVERY sub-call succeeded; inspect \`reverts[]\` for partials.`,
+- ALL entries land in ONE on-chain tryAggregate tx — every sub-call shares the same txHash. \`ok\` is true only when EVERY sub-call succeeded; inspect \`reverts[]\` for partials.
+
+SLIPPAGE: backend's place-orders DTO requires one of {desiredRate, slippage} per single/bulk. If neither is provided, this tool fills slippage with the per-market default (0.5 × market.maxRateDeviation). Backend ignores slippage for GTC/ALO/SOFT_ALO (limitTick is the guard); for FOK/IOC the default acts as a real ceiling.`,
       inputSchema: {
         entries: z
           .array(
@@ -205,11 +208,12 @@ Constraints:
             const tokenId: number = market.tokenId;
             const marketAcc = resolveMarketAcc(rootAddress, accountId, tokenId, e.marginMode, e.marketId);
             const sizeRaw = parseSize(e.size).toString();
-            // GTC/ALO/SOFT_ALO already gated by per-tick limitTick → slippage:1 (disabled);
-            // FOK/IOC takers required a real guard above.
+            // place-orders DTO requires one of {desiredRate, slippage} per entry — cannot drop
+            // slippage entirely the way single-entry place_order does. Use the per-market default
+            // (0.5 × maxRateDeviation) as the satisfying value; backend ignores it for resting TIFs.
             let effectiveSlippage = e.slippage;
             if (effectiveSlippage === undefined && e.desiredRate === undefined) {
-              effectiveSlippage = 1;
+              effectiveSlippage = computeDefaultSlippage(market);
               slippageDefaultedSingles.push(i);
             }
             // ALO/SOFT_ALO cannot route AMM — backend strips ammId, calldata + intent must agree on 0.
@@ -243,32 +247,38 @@ Constraints:
               ...(typeof e.limitTick === 'number' ? { tickExact: e.limitTick } : {}),
             });
           } else {
-            const bulks = e.bulks.map((b: any) => {
-              const cancelData = b.cancelData
-                ? {
-                    ids: b.cancelData.ids ?? [],
-                    isAll: b.cancelData.isAll,
-                    isStrict: b.cancelData.isStrict,
-                  }
-                : { ids: [], isAll: false, isStrict: false };
-              const guard =
-                b.desiredRate !== undefined
-                  ? { desiredRate: b.desiredRate }
-                  : b.slippage !== undefined
-                    ? { slippage: b.slippage }
-                    : { slippage: 1 };
-              return {
-                marketId: b.marketId,
-                cancelData,
-                orders: {
-                  side: SIDE_MAP[b.orders.side as keyof typeof SIDE_MAP],
-                  sizes: b.orders.sizes.map((s: string) => parseSize(s).toString()),
-                  limitTicks: b.orders.limitTicks,
-                  tif: TIF_MAP[b.orders.timeInForce as keyof typeof TIF_MAP],
-                },
-                ...guard,
-              };
-            });
+            const bulks = await Promise.all(
+              (e.bulks as any[]).map(async (b: any) => {
+                const cancelData = b.cancelData
+                  ? {
+                      ids: b.cancelData.ids ?? [],
+                      isAll: b.cancelData.isAll,
+                      isStrict: b.cancelData.isStrict,
+                    }
+                  : { ids: [], isAll: false, isStrict: false };
+                let guard: { desiredRate: number } | { slippage: number };
+                if (b.desiredRate !== undefined) {
+                  guard = { desiredRate: b.desiredRate };
+                } else if (b.slippage !== undefined) {
+                  guard = { slippage: b.slippage };
+                } else {
+                  // Backend requires one of {desiredRate, slippage}; use per-market default.
+                  const bMarket = await getMarketInfo(b.marketId);
+                  guard = { slippage: computeDefaultSlippage(bMarket) };
+                }
+                return {
+                  marketId: b.marketId,
+                  cancelData,
+                  orders: {
+                    side: SIDE_MAP[b.orders.side as keyof typeof SIDE_MAP],
+                    sizes: b.orders.sizes.map((s: string) => parseSize(s).toString()),
+                    limitTicks: b.orders.limitTicks,
+                    tif: TIF_MAP[b.orders.timeInForce as keyof typeof TIF_MAP],
+                  },
+                  ...guard,
+                };
+              }),
+            );
             orderRequests.push({ bulkOrders: { accountId, cross: e.cross, bulks } });
 
             const allMarketIds = e.bulks.map((b: any) => b.marketId);
@@ -416,7 +426,7 @@ Constraints:
             ? {
                 slippageDefaultedSingles,
                 slippageDefaultedNote:
-                  'Indicated single entries got slippage:1 (effectively disabled) because no slippage/desiredRate was provided. Per-tick limitTick still gates fills for resting orders, so this is safe for GTC/ALO/SOFT_ALO.',
+                  'Indicated single entries got the per-market default slippage (0.5 × market.maxRateDeviation) because no slippage/desiredRate was provided. Backend ignores slippage for GTC/ALO/SOFT_ALO (limitTick is the guard); for FOK/IOC this acts as a real ceiling.',
               }
             : {}),
           ...(Object.keys(orderIdsByMarket).length > 0 ? { orderIdsByMarket } : {}),
