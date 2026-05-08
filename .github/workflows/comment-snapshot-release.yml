@@ -54,11 +54,10 @@ jobs:
     uses: ./.github/workflows/snapshot-release.yml
     permissions:
       contents: read
-      id-token: write
     with:
       ref: ${{ needs.pr-comment-action.outputs.head_ref }}
     secrets:
-      NPM_PUBLISH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   notify-done:
     runs-on: ubuntu-latest

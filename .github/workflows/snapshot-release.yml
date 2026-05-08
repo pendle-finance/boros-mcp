@@ -12,7 +12,7 @@ on:
         description: "Package version"
         value: ${{ jobs.release.outputs.package_version }}
     secrets:
-      NPM_PUBLISH_TOKEN:
+      NPM_TOKEN:
         required: true
 
 permissions:
@@ -29,11 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     env:
       REF: ${{ inputs.ref || github.ref }}
       BRANCH_NAME: ${{ inputs.ref || github.head_ref || github.ref_name }}
-      BOROS_MCP_NPM_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+      BOROS_MCP_NPM_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     outputs:
       package_version: ${{ steps.changeset_prepare.outputs.package_version }}
     steps:
@@ -64,3 +63,4 @@ jobs:
           publish: yarn release --tag snapshot
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

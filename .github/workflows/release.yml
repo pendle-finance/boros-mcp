@@ -20,9 +20,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      id-token: write
     env:
-      BOROS_MCP_NPM_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+      BOROS_MCP_NPM_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,3 +47,4 @@ jobs:
           publish: yarn release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
