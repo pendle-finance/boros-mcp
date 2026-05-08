@@ -54,7 +54,6 @@ jobs:
     uses: ./.github/workflows/snapshot-release.yml
     permissions:
       contents: read
-      id-token: write
     with:
       ref: ${{ needs.pr-comment-action.outputs.head_ref }}
     secrets:
