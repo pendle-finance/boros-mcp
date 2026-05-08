@@ -36,8 +36,7 @@
     "url": "https://github.com/pendle-finance/boros-mcp/issues"
   },
   "publishConfig": {
-    "access": "public",
-    "tag": "beta"
+    "access": "public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

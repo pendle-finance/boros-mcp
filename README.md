@@ -12,14 +12,12 @@ Ask things like *"current 3-month BTC perp funding rate?"*, *"open 0.5 ETH long 
 
 ## Install
 
-> Beta — published under the `beta` dist-tag. Use `@beta` or pin `0.x.y-beta.z`.
-
 Node ≥ 18. Ships a `boros-mcp` binary.
 
 ```bash
-npx -y @pendle/boros-mcp@beta
+npx -y @pendle/boros-mcp
 # or
-yarn global add @pendle/boros-mcp@beta && boros-mcp
+yarn global add @pendle/boros-mcp && boros-mcp
 ```
 
 From source (only if hacking on it):
@@ -38,7 +36,7 @@ The server speaks MCP over **stdio**, so any compliant client can launch it. Pic
 One command (recommended):
 
 ```bash
-claude mcp add boros -- npx -y @pendle/boros-mcp@beta
+claude mcp add boros -- npx -y @pendle/boros-mcp
 ```
 
 Add `--scope user` for global (all projects) instead of the default project scope. Verify with `claude mcp list`.
@@ -54,7 +52,7 @@ Edit `claude_desktop_config.json`:
   "mcpServers": {
     "boros": {
       "command": "npx",
-      "args": ["-y", "@pendle/boros-mcp@beta"]
+      "args": ["-y", "@pendle/boros-mcp"]
     }
   }
 }
@@ -69,7 +67,7 @@ Edit `~/.codex/config.toml`:
 ```toml
 [mcp_servers.boros]
 command = "npx"
-args = ["-y", "@pendle/boros-mcp@beta"]
+args = ["-y", "@pendle/boros-mcp"]
 ```
 
 ### Gemini CLI
@@ -81,7 +79,7 @@ Edit `~/.gemini/settings.json` (or your project's `.gemini/settings.json`):
   "mcpServers": {
     "boros": {
       "command": "npx",
-      "args": ["-y", "@pendle/boros-mcp@beta"]
+      "args": ["-y", "@pendle/boros-mcp"]
     }
   }
 }
@@ -97,7 +95,7 @@ Edit `~/.config/opencode/opencode.json` (or `opencode.json` at the project root)
   "mcp": {
     "boros": {
       "type": "local",
-      "command": ["npx", "-y", "@pendle/boros-mcp@beta"],
+      "command": ["npx", "-y", "@pendle/boros-mcp"],
       "enabled": true
     }
   }
@@ -115,7 +113,7 @@ Replace the `command`/`args` block in any of the configs above with:
 
 ### Other MCP clients
 
-Run `npx -y @pendle/boros-mcp@beta` (or `boros-mcp` if globally installed) and point your client at it over stdio transport.
+Run `npx -y @pendle/boros-mcp` (or `boros-mcp` if globally installed) and point your client at it over stdio transport.
 
 ## How approvals work — read this first
 
