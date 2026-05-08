@@ -22,6 +22,8 @@ import {
   tryBigInt,
   tifString,
   limitAprWarning,
+  computeDefaultSlippage,
+  RESTING_TIFS,
   TIF_MAP,
   SIDE_MAP,
   type SideStr,
@@ -54,11 +56,14 @@ export function registerOrderTools(server: McpServer) {
 
 UNITS: \`size\` is YU (yield units), ALWAYS POSITIVE — direction comes from \`side\` (LONG/SHORT). NEVER sign size to indicate short. \`limitApr\` and \`slippage\` are DECIMALS (0.05 = 5%, NOT 5). \`marginMode:'cross'\` = per-token shared bucket (across all entered markets for that token); \`'isolated'\` = per-market subaccount. The actual encoded rate may snap by up to half a tick (LONG rounds DOWN, SHORT rounds UP).
 
+SLIPPAGE: optional — if omitted, defaults per-market to 0.5 × market.maxRateDeviation (mirrors dapp-nitro). Backend uses slippage ONLY for FOK market orders; for GTC/ALO/SOFT_ALO/IOC the limitApr is the guard, and the field is silently ignored on the wire (this tool drops it from the request for resting TIFs).
+
 WORKFLOW for a new trade:
 1. If user gave a market name, resolve marketId via get_markets.
 2. Ask for missing info: side, size, order type, limitApr if limit.
 3. Call mode:'simulate' to preview.
-4. If user confirms, call mode:'execute' with the SAME params.
+4. SURFACE simulation.priceImpactPercent, matched rate, marginRequired, and liquidationApr to the user. priceImpact is the estimated rate movement caused by this fill — the user MUST see it before confirming, especially for market orders or large notional.
+5. Only after explicit user confirmation, call mode:'execute' with the SAME params.
 
 If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
       inputSchema: {
@@ -76,10 +81,11 @@ If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
         marginMode: marginModeField(),
         slippage: slippageField('MUST match between simulate and execute — different values produce a different desiredRate, so the execute can reject on PRICE_IMPACT_TOO_HIGH even if the simulate succeeded.'),
         timeInForce: timeInForceField(),
+        includeAmm: z.boolean().default(true).describe('AMM routing toggle. true (default) = route via market AMM if one exists (resolved from market.extConfig.ammId / market.metadata.ammId, else 0). false = force orderbook-only. Forced to orderbook-only internally for ALO/SOFT_ALO regardless.'),
         acknowledgeHighRate: z.boolean().default(false).describe('Required when |limitApr| exceeds max(1, |markApr|*5) for the target market. The floor scales with each market\'s current markApr — typical 5%-mark books reject limitApr:5 (= 500%) as a percent-vs-decimal typo, while markets quoting 80%+ APR accept commensurate values without ack.'),
       },
     },
-    withAuth(async ({ mode, marketId, side, size, orderType, limitApr, marginMode, slippage, timeInForce, acknowledgeHighRate }, { rootAddress }) => {
+    withAuth(async ({ mode, marketId, side, size, orderType, limitApr, marginMode, slippage, timeInForce, includeAmm, acknowledgeHighRate }, { rootAddress }) => {
       try {
         const accountId = DEFAULT_ACCOUNT_ID;
 
@@ -88,7 +94,8 @@ If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
         const marketNameRaw: string | undefined = market.imData?.name;
         const marketSymbol: string | undefined = market.metadata?.underlyingSymbol;
         const collateralSymbol = await resolveCollateralSymbol(tokenId);
-        const ammId: number = market.extConfig?.ammId ?? market.metadata?.ammId ?? 0;
+        const marketDefaultAmmId: number = market.extConfig?.ammId ?? market.metadata?.ammId ?? 0;
+        const ammId: number = includeAmm ? marketDefaultAmmId : 0;
 
         // TIF↔orderType compatibility: GTC/ALO/SOFT_ALO need a rate (resting limit semantics);
         // a "market" order with one of these TIFs is contradictory. Catch here so the user gets
@@ -130,6 +137,10 @@ If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
         // and intent must agree on 0 to avoid a verifier mismatch.
         const effectiveAmmId = (tif === 'ALO' || tif === 'SOFT_ALO') ? 0 : ammId;
 
+        const effectiveSlippage = RESTING_TIFS.has(tif)
+          ? undefined
+          : (slippage ?? computeDefaultSlippage(market));
+
         const sim = await fetchWithRetry(() =>
           openApiPost('/v1/simulations/place-order', {
             marketAcc,
@@ -138,7 +149,7 @@ If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
             size: sizeRaw,
             tif: TIF_MAP[tif],
             ...(limitApr !== undefined ? { rate: limitApr } : {}),
-            slippage,
+            ...(effectiveSlippage !== undefined ? { slippage: effectiveSlippage } : {}),
             ammId: effectiveAmmId,
           }),
         );
@@ -146,8 +157,11 @@ If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
         if (mode === 'simulate') {
           // execute re-simulates seconds later → often PRICE_IMPACT_TOO_HIGH on same params;
           // surface a structured signal so LLM can widen slippage before mode:'execute'.
+          // Resting TIFs send no slippage → no near-slippage warning to compute.
           const priceImpactNearSlippage =
-            typeof sim.priceImpact === 'number' && Math.abs(sim.priceImpact) > slippage * 0.8;
+            effectiveSlippage !== undefined &&
+            typeof sim.priceImpact === 'number' &&
+            Math.abs(sim.priceImpact) > effectiveSlippage * 0.8;
 
           return jsonResult({
             ok: true,
@@ -173,14 +187,14 @@ If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
               ...(priceImpactNearSlippage
                 ? {
                     priceImpactNearSlippage: true,
-                    priceImpactWarning: `Simulated price impact ${((sim.priceImpact as number) * 100).toFixed(2)}% is close to slippage tolerance ${(slippage * 100).toFixed(2)}%. Consider raising slippage before mode:'execute'.`,
+                    priceImpactWarning: `Simulated price impact ${((sim.priceImpact as number) * 100).toFixed(2)}% is close to slippage tolerance ${((effectiveSlippage as number) * 100).toFixed(2)}%. Consider raising slippage before mode:'execute'.`,
                   }
                 : {}),
             },
             nextTool: {
               tool: 'place_order',
-              params: { mode: 'execute', marketId, side, size, orderType, limitApr, marginMode, slippage, timeInForce },
-              instruction: 'If the user confirms, call place_order with mode:"execute" and the SAME params to submit the trade.',
+              params: { mode: 'execute', marketId, side, size, orderType, limitApr, marginMode, slippage, timeInForce, includeAmm },
+              instruction: 'Surface priceImpact (priceImpactPercent), matched rate (matched.rate), marginRequired, and liquidationApr to the user BEFORE asking for confirmation. Only after explicit user confirmation, call place_order with mode:"execute" and the SAME params.',
             },
             _context: { apr: APR_NOTE },
           });
@@ -192,8 +206,10 @@ If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
           isMarketOrder: orderType === 'market',
         });
         if (simErr) return simErr;
-        const impactErr = assertPriceImpactWithinSlippage(sim, slippage, { variant: 'order' });
-        if (impactErr) return impactErr;
+        if (effectiveSlippage !== undefined) {
+          const impactErr = assertPriceImpactWithinSlippage(sim, effectiveSlippage, { variant: 'order' });
+          if (impactErr) return impactErr;
+        }
 
         // Reject pre-tx — saves gas, surfaces NO_FILL not generic revert.
         const matchedSize = sim.matched?.size ? BigInt(sim.matched.size) : 0n;
@@ -235,15 +251,12 @@ If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
             size: sizeRaw,
             tif: TIF_MAP[tif],
             ...(limitApr !== undefined ? { rate: limitApr } : {}),
-            slippage,
+            ...(effectiveSlippage !== undefined ? { slippage: effectiveSlippage } : {}),
             ammId: effectiveAmmId,
           }),
         );
         const calldatas = extractCalldatas(calldataRes);
 
-        // PIN marketId, NOT marketAcc — OrderReq.marketId is real uint24 (not cross-sentinel);
-        // cross is separate OrderReq.cross. Pinning marketAcc (encodes CROSS_MARKET_ID) would
-        // false-positive every cross call. No tick pin — slippage + desiredMatchRate cover it.
         const sizeForIntent = tryBigInt(sizeRaw);
         const placeIntent: IntentExpectation = {
           selector: ROUTER_SELECTORS.placeSingleOrder,

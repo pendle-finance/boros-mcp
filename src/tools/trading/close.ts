@@ -23,6 +23,8 @@ import {
   tifString,
   flipSideString,
   limitAprWarning,
+  computeDefaultSlippage,
+  RESTING_TIFS,
   TIF_MAP,
   SIDE_MAP,
 } from './_helpers.js';
@@ -52,13 +54,15 @@ export function registerCloseTools(server: McpServer) {
     'close_position',
     {
       annotations: { destructiveHint: true },
-      description: `Simulate or execute closing a position. Default mode is 'simulate' — ALWAYS run mode:'simulate' first, show the preview, then ONLY call mode:'execute' AFTER explicit user confirmation.
+      description: `Simulate or execute closing a position. Default mode is 'simulate' — ALWAYS run mode:'simulate' first, surface simulation.priceImpactPercent, matched rate, closeTradePnl, and marginRequired to the user, then ONLY call mode:'execute' AFTER explicit user confirmation.
 
 The tool AUTO-FLIPS your input \`side\` (the position side) to derive the counter-order side internally — pass the side of the OPEN position, NOT the close direction. Omit \`size\` to close the full active position.
 
-Reduce-only is NOT enforced server-side anymore (the backend dropped its validateCloseActivePosition path) and the on-chain placeSingleOrder has NO reduce-only flag — the only guard is this tool's local pre-flight check that compares the requested size to the current absolute position size. Between simulate and execute, an external fill or liquidation can shrink/flip the position so that the same size opens a REVERSE position. To reduce risk, prefer partial-close with explicit \`size\` over full-close, and re-simulate immediately before confirming.
+Reduce-only is NOT enforced server-side and the on-chain \`placeSingleOrder\` has NO reduce-only flag — the only guard is this tool's local pre-flight check that compares the requested size to the current absolute position size. Between simulate and execute, an external fill or liquidation can shrink/flip the position so that the same size opens a REVERSE position. To reduce risk, prefer partial-close with explicit \`size\` over full-close, and re-simulate immediately before confirming.
 
-UNITS: \`size\` is YU, always positive. \`limitApr\` and \`slippage\` are DECIMALS (0.05 = 5%, NOT 5). \`marginMode\` MUST match how the position was opened (cross/isolated) — otherwise the position lookup fails. If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
+UNITS: \`size\` is YU, always positive. \`limitApr\` and \`slippage\` are DECIMALS (0.05 = 5%, NOT 5). \`marginMode\` MUST match how the position was opened (cross/isolated) — otherwise the position lookup fails. If execute fails with "Insufficient gas balance", top up via pay_gas first.
+
+SLIPPAGE: optional — defaults per-market to 0.5 × market.maxRateDeviation. Effective only for FOK; dropped from the request for GTC/ALO/SOFT_ALO (limitApr is the guard there).`,
       inputSchema: {
         mode: z
           .enum(['simulate', 'execute'])
@@ -74,9 +78,10 @@ UNITS: \`size\` is YU, always positive. \`limitApr\` and \`slippage\` are DECIMA
         marginMode: marginModeField('MUST match how the position was opened.'),
         slippage: slippageField('MUST match between simulate and execute.'),
         timeInForce: timeInForceField(),
+        includeAmm: z.boolean().default(true).describe('AMM routing toggle. true (default) = route via market AMM if one exists (resolved from market.extConfig.ammId / market.metadata.ammId, else 0). false = force orderbook-only. Forced to orderbook-only internally for ALO/SOFT_ALO regardless.'),
       },
     },
-    withAuth(async ({ mode, marketId, side, size, closeType, limitApr, marginMode, slippage, timeInForce }, { rootAddress }) => {
+    withAuth(async ({ mode, marketId, side, size, closeType, limitApr, marginMode, slippage, timeInForce, includeAmm }, { rootAddress }) => {
       try {
         const accountId = DEFAULT_ACCOUNT_ID;
 
@@ -85,7 +90,8 @@ UNITS: \`size\` is YU, always positive. \`limitApr\` and \`slippage\` are DECIMA
         const marketNameRaw: string | undefined = market.imData?.name;
         const marketSymbol: string | undefined = market.metadata?.underlyingSymbol;
         const collateralSymbol = await resolveCollateralSymbol(tokenId);
-        const ammId: number = market.extConfig?.ammId ?? market.metadata?.ammId ?? 0;
+        const marketDefaultAmmId: number = market.extConfig?.ammId ?? market.metadata?.ammId ?? 0;
+        const ammId: number = includeAmm ? marketDefaultAmmId : 0;
 
         if (closeType === 'limit' && limitApr === undefined) {
           return errorContent(BorosErrorCode.INVALID_PARAMS, 'limitApr is required for limit close orders');
@@ -145,6 +151,11 @@ UNITS: \`size\` is YU, always positive. \`limitApr\` and \`slippage\` are DECIMA
         // and intent must agree on 0 to avoid a verifier mismatch.
         const effectiveAmmId = (tif === 'ALO' || tif === 'SOFT_ALO') ? 0 : ammId;
 
+        // GTC/ALO/SOFT_ALO: backend ignores slippage; limitApr is the guard.
+        const effectiveSlippage = RESTING_TIFS.has(tif)
+          ? undefined
+          : (slippage ?? computeDefaultSlippage(market));
+
         // close-position sim removed — use place-order sim. positionSignedSize guard above
         // is the only protection against position flip.
         const sim = await fetchWithRetry(() =>
@@ -155,7 +166,7 @@ UNITS: \`size\` is YU, always positive. \`limitApr\` and \`slippage\` are DECIMA
             size: sizeRaw,
             tif: TIF_MAP[tif],
             ...(limitApr !== undefined ? { rate: limitApr } : {}),
-            slippage,
+            ...(effectiveSlippage !== undefined ? { slippage: effectiveSlippage } : {}),
             ammId: effectiveAmmId,
           }),
         );
@@ -194,8 +205,8 @@ UNITS: \`size\` is YU, always positive. \`limitApr\` and \`slippage\` are DECIMA
             },
             nextTool: {
               tool: 'close_position',
-              params: { mode: 'execute', marketId, side, size, closeType, limitApr, marginMode, slippage, timeInForce },
-              instruction: 'If the user confirms, call close_position with mode:"execute" and the same params to submit.',
+              params: { mode: 'execute', marketId, side, size, closeType, limitApr, marginMode, slippage, timeInForce, includeAmm },
+              instruction: 'Surface priceImpact (priceImpactPercent), matched rate (matched.rate), closeTradePnl, and marginRequired to the user BEFORE asking for confirmation. Only after explicit user confirmation, call close_position with mode:"execute" and the same params.',
             },
             _context: { apr: APR_NOTE },
           });
@@ -207,8 +218,10 @@ UNITS: \`size\` is YU, always positive. \`limitApr\` and \`slippage\` are DECIMA
           isMarketOrder: closeType === 'market',
         });
         if (simErr) return simErr;
-        const impactErr = assertPriceImpactWithinSlippage(sim, slippage, { variant: 'close' });
-        if (impactErr) return impactErr;
+        if (effectiveSlippage !== undefined) {
+          const impactErr = assertPriceImpactWithinSlippage(sim, effectiveSlippage, { variant: 'close' });
+          if (impactErr) return impactErr;
+        }
 
         const calldataRes = await fetchWithRetry(() =>
           openApiPost('/v1/calldata-builder/agent/place-order', {
@@ -218,7 +231,7 @@ UNITS: \`size\` is YU, always positive. \`limitApr\` and \`slippage\` are DECIMA
             size: sizeRaw,
             tif: TIF_MAP[tif],
             ...(limitApr !== undefined ? { rate: limitApr } : {}),
-            slippage,
+            ...(effectiveSlippage !== undefined ? { slippage: effectiveSlippage } : {}),
             ammId: effectiveAmmId,
           }),
         );
