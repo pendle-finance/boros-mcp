@@ -19,7 +19,7 @@ import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { withAuth } from '../_with-auth.js';
 import { buildIncludeSet, projectFields, includeFieldSchema } from '../_shared/projection.js';
 
-const LIMIT_ORDERS_DEFAULT_FIELDS = [
+const ORDERS_DEFAULT_FIELDS = [
   'orderId',
   'marketId',
   'marketName',
@@ -31,7 +31,7 @@ const LIMIT_ORDERS_DEFAULT_FIELDS = [
   'unfilled',
   'impliedAprPercent',
 ] as const;
-const LIMIT_ORDERS_OPTIONAL_FIELDS = [
+const ORDERS_OPTIONAL_FIELDS = [
   'marketAcc',
   'marketAccDecoded',
   'placedAt',
@@ -57,7 +57,7 @@ const ORDER_TYPE_LABELS: Record<number, string> = {
   3: 'STOP_LOSS_MARKET',
 };
 
-function enrichLimitOrder(
+function enrichOrder(
   order: any,
   marketMap: Map<number, MarketInfo>,
   assetMap: Map<number, AssetInfo>,
@@ -91,12 +91,12 @@ function enrichLimitOrder(
 
 export function registerAccountOrdersTools(server: McpServer) {
   server.registerTool(
-    'get_limit_orders',
+    'get_orders',
     {
       annotations: { readOnlyHint: true },
-      description: `List a user's limit orders. Two sort modes:
+      description: `List a user's orders (LIMIT, MARKET, TAKE_PROFIT_MARKET, STOP_LOSS_MARKET). Two sort modes:
 
-\`sort:'updated'\` (default): newest by last-updated event index — supports filtering by \`marketId\` and \`isActive\`. Paginating mid-stream can miss/duplicate orders that were updated between pages. Default \`isActive:true\` returns only currently-open orders. Use this for "open orders" / "pending orders" queries.
+\`sort:'updated'\` (default): newest by last-updated event index — supports filtering by \`marketId\` and \`isActive\`. Paginating mid-stream can miss/duplicate orders that were updated between pages. Default \`isActive:true\` returns only currently-open orders (typically resting LIMIT / TP / SL). Use this for "open orders" / "pending orders" queries.
 
 \`sort:'placed'\`: newest by placed event index (immutable cursor) — guarantees no orders missed when fully enumerating, but ignores the \`marketId\` and \`isActive\` filters. Higher \`limit\` cap (2000 vs 100). Use when you need the complete history.
 
@@ -120,15 +120,15 @@ To cancel a returned order, pass its \`orderId\` (not \`placedTxHash\`) to \`can
           .optional()
           .describe('Cursor token from previous response.'),
         include: includeFieldSchema({
-          defaults: LIMIT_ORDERS_DEFAULT_FIELDS,
-          optional: LIMIT_ORDERS_OPTIONAL_FIELDS,
+          defaults: ORDERS_DEFAULT_FIELDS,
+          optional: ORDERS_OPTIONAL_FIELDS,
           noun: 'fields per order',
         }),
       },
     },
     withAuth(async ({ userAddress, accountId, sort, marketId, isActive, limit, resumeToken, include }) => {
       try {
-        const includeSet = buildIncludeSet(include, LIMIT_ORDERS_DEFAULT_FIELDS, LIMIT_ORDERS_OPTIONAL_FIELDS);
+        const includeSet = buildIncludeSet(include, ORDERS_DEFAULT_FIELDS, ORDERS_OPTIONAL_FIELDS);
         if (sort === 'placed') {
           const cappedLimit = Math.min(limit ?? 20, 2000);
           const res = await fetchWithRetry(() =>
@@ -141,7 +141,7 @@ To cancel a returned order, pass its \`orderId\` (not \`placedTxHash\`) to \`can
           );
           const results = res.results ?? (Array.isArray(res) ? res : []);
           const [marketMap, assetMap] = await Promise.all([fetchMarketMap(), safeAssetMap()]);
-          const orders = results.map((order: any) => enrichLimitOrder(order, marketMap, assetMap, includeSet));
+          const orders = results.map((order: any) => enrichOrder(order, marketMap, assetMap, includeSet));
           return jsonResult({
             sort,
             count: orders.length,
@@ -172,7 +172,7 @@ To cancel a returned order, pass its \`orderId\` (not \`placedTxHash\`) to \`can
         const results = data.results ?? (Array.isArray(data) ? data : []);
         const [marketMap, assetMap] = await Promise.all([fetchMarketMap(), safeAssetMap()]);
 
-        const orders = results.map((order: any) => enrichLimitOrder(order, marketMap, assetMap, includeSet));
+        const orders = results.map((order: any) => enrichOrder(order, marketMap, assetMap, includeSet));
 
         return jsonResult({
           sort,
