@@ -1,7 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { openApiGet, openApiPost } from '../../api/open-api.js';
+import { openApiGet } from '../../api/open-api.js';
 import { jsonResult, formatX18, decodeMarketAcc, sumBigInts } from '../../utils.js';
+import { unpackMarketAcc } from '../../chain/pack-account.js';
 import { userAddressField, accountIdField } from '../_schemas.js';
 import { catchToErrorContent } from '../../agent/errors.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
@@ -12,7 +13,7 @@ export function registerPortfolioSummaryTools(server: McpServer): void {
     'get_portfolio_summary',
     {
       annotations: { readOnlyHint: true },
-      description: 'Aggregate portfolio snapshot for an account: per-collateral-token totals (collateral, equity, initial/available margin), open-position count, open-order count, margin utilization, and optionally unrealized PnL. Single read-only call that replaces fan-out over get_collateral + get_positions + get_pnl_by_market + get_limit_orders. Use summaryByToken when summary.isCrossCollateral is true (positions in >1 token, e.g. WETH and USDT). Pass includePnl:true only when needed — it issues one extra request per (marketAcc, marketId) pair. Does NOT include the gas wallet (use get_gas_info).',
+      description: 'Aggregate portfolio snapshot for an account: per-collateral-token totals (collateral, equity, initial/available margin), open-position count, open-order count, margin utilization, and optionally unrealized PnL. Discovers EVERY funded sub-account under the root via /v1/accounts/market-acc-infos-by-root, so dust accounts (cash but no positions, cross or isolated) are included. Single read-only call that replaces fan-out over get_collateral + get_positions + get_pnl_by_market + get_orders. Use summaryByToken when summary.isCrossCollateral is true (positions in >1 token, e.g. WETH and USDT). Does NOT include the gas wallet (use get_gas_info).',
       inputSchema: {
         userAddress: userAddressField(),
         accountId: accountIdField('Default 0 for main account.'),
@@ -21,27 +22,22 @@ export function registerPortfolioSummaryTools(server: McpServer): void {
     },
     async ({ userAddress, accountId, includePnl }) => {
       try {
-        const positionsRes = await fetchWithRetry(() =>
-          openApiGet('/v1/accounts/active-positions', {
-            root: userAddress,
-            accountId: accountId ?? 0,
-          }),
-        );
-        const positions = Array.isArray(positionsRes) ? positionsRes : (positionsRes.results ?? []);
-        const marketAccs = [...new Set(
-          positions.map((p: any) => p.marketAcc).filter((x: unknown): x is string => typeof x === 'string'),
-        )];
-
-        // Skip market-acc-infos when no positions.
+        const wantAccountId = accountId ?? 0;
         const ORDER_PAGE_LIMIT = 100;
-        const [accInfosRes, ordersRes, assetMap] = await Promise.all([
-          marketAccs.length
-            ? fetchWithRetry(() => openApiPost('/v1/accounts/market-acc-infos', { marketAccs }))
-            : Promise.resolve({ results: [] as any[] }),
+        const [positionsRes, accInfosRes, ordersRes, assetMap] = await Promise.all([
+          fetchWithRetry(() =>
+            openApiGet('/v1/accounts/active-positions', {
+              root: userAddress,
+              accountId: wantAccountId,
+            }),
+          ),
+          fetchWithRetry(() =>
+            openApiGet('/v1/accounts/market-acc-infos-by-root', { root: userAddress }),
+          ),
           fetchWithRetry(() =>
             openApiGet('/v1/accounts/orders', {
               root: userAddress,
-              accountId: accountId ?? 0,
+              accountId: wantAccountId,
               isActive: true,
               limit: ORDER_PAGE_LIMIT,
             }),
@@ -49,9 +45,15 @@ export function registerPortfolioSummaryTools(server: McpServer): void {
           safeAssetMap(),
         ]);
 
-        const accounts: any[] = Array.isArray(accInfosRes)
+        const positions = Array.isArray(positionsRes) ? positionsRes : (positionsRes.results ?? []);
+        const allAccounts: any[] = Array.isArray(accInfosRes)
           ? accInfosRes
           : (accInfosRes.results ?? []);
+        const accounts: any[] = allAccounts.filter((a: any) => {
+          if (!a?.marketAcc) return false;
+          try { return unpackMarketAcc(a.marketAcc).accountId === wantAccountId; }
+          catch { return false; }
+        });
 
         // Group by collateral tokenSymbol so multi-collateral accounts (WETH+USDT) get a
         // per-token breakdown instead of a nonsensical cross-token sum. Aggregate as bigint
@@ -174,7 +176,7 @@ export function registerPortfolioSummaryTools(server: McpServer): void {
             summary: 'Cross-collateral sums of 18-dec FixedX18 raw values. Only meaningful when summary.isCrossCollateral is false (single collateral token). When true, READ summaryByToken — adding e.g. WETH + USDT amounts is not meaningful.',
             summaryByToken: 'Per-collateral-token aggregation (keyed by token symbol). Use this whenever the account holds positions in more than one collateral.',
             marginUtilizationPct: 'initialMargin / netBalance expressed as percent (0–100+). null when netBalance <= 0. Computed across all marketAccs combined; meaningful only for single-collateral accounts.',
-            openOrderCount: `Open limit orders across all markets. Based on a single page query (limit=${ORDER_PAGE_LIMIT}); when openOrderCountIsLowerBound is true, paginate get_limit_orders with sort:"placed" for the exact count.`,
+            openOrderCount: `Open limit orders across all markets. Based on a single page query (limit=${ORDER_PAGE_LIMIT}); when openOrderCountIsLowerBound is true, paginate get_orders with sort:"placed" for the exact count.`,
             gasWalletNote: 'Does NOT include the gas wallet (ETH for tx fees) — use get_gas_info.',
             ...(includePnl
               ? { unrealizedPnl: 'Sum of unrealisedPnl across each active (marketAcc, marketId). Sourced from /v1/accounts/active-positions — no extra requests.' }

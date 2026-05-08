@@ -323,7 +323,6 @@ SLIPPAGE: backend's place-orders DTO requires one of {desiredRate, slippage} per
             return sideLabel !== undefined ? { ...r, side: sideLabel } : r;
           }
           // Backend returns resolved:null for bulk entries — synthesize from inputs so the caller
-          // doesn't have to round-trip get_limit_orders to confirm what was encoded.
           const e: any = entries[i];
           if (e?.kind === 'bulk') {
             return {

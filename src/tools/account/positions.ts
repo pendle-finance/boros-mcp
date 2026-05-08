@@ -149,7 +149,7 @@ export function registerAccountPositionsTools(server: McpServer) {
     'get_collateral',
     {
       annotations: { readOnlyHint: true },
-      description: 'Get per-marketAcc margin/equity (totalCash, netBalance, initialMargin, availableInitialMargin, availableMaintMargin, per-position margin/liquidationApr/orders) by POSTing /v1/accounts/market-acc-infos. When marketAccs is omitted, derives the list from active positions AND synthesizes the cross marketAcc for every known token — so a cross account with cash but no positions is still visible. Boros supports multi-asset collateral: each account entry carries its own marketAccDecoded.tokenSymbol (USDT, WETH, etc.) but all numeric *Formatted values are 18-dec normalized internal cash units (do NOT re-scale by token on-chain decimals). NOT a gas-balance view — for that use get_gas_info.',
+      description: 'Get per-marketAcc margin/equity (totalCash, netBalance, initialMargin, availableInitialMargin, availableMaintMargin, per-position margin/liquidationApr/orders). When marketAccs is omitted, calls GET /v1/accounts/market-acc-infos-by-root to discover EVERY funded sub-account under the root (cross + isolated, including dust accounts with cash but no positions) and filters by accountId locally. When marketAccs is provided, POSTs /v1/accounts/market-acc-infos for the exact list. Boros supports multi-asset collateral: each account entry carries its own marketAccDecoded.tokenSymbol (USDT, WETH, etc.) but all numeric *Formatted values are 18-dec normalized internal cash units (do NOT re-scale by token on-chain decimals). NOT a gas-balance view — for that use get_gas_info.',
       inputSchema: {
         userAddress: userAddressField(),
         accountId: accountIdField('Default 0 for main account.'),
@@ -166,42 +166,34 @@ export function registerAccountPositionsTools(server: McpServer) {
     },
     withAuth(async ({ userAddress, accountId, marketAccs, filter, sort }) => {
       try {
-        // No marketAccs → derive from active positions AND synthesize cross marketAcc per known
-        // tokenId so freshly-funded cross accounts (no positions yet) aren't reported as empty.
-        let accs = marketAccs;
-        if (!accs || accs.length === 0) {
-          const [positions, assetMap] = await Promise.all([
-            fetchWithRetry(() =>
-              openApiGet('/v1/accounts/active-positions', {
-                root: userAddress,
-                accountId: accountId ?? 0,
-              }),
-            ),
-            safeAssetMap(),
-          ]);
-          const posArray = Array.isArray(positions) ? positions : (positions.results ?? []);
-          const fromPositions = new Set(posArray.map((p: any) => p.marketAcc).filter(Boolean) as string[]);
-          // Include cross marketAcc per tokenId so cash-but-no-position accounts stay visible.
-          for (const tokenId of assetMap.keys()) {
+        let res: any;
+        if (!marketAccs || marketAccs.length === 0) {
+          res = await fetchWithRetry(() =>
+            openApiGet('/v1/accounts/market-acc-infos-by-root', { root: userAddress }),
+          );
+          const all = Array.isArray(res) ? res : (res.results ?? []);
+          const wantAccountId = accountId ?? 0;
+          const filteredByAccount = all.filter((a: any) => {
+            if (!a?.marketAcc) return false;
             try {
-              fromPositions.add(packMarketAcc(userAddress as Address, accountId ?? 0, tokenId, CROSS_MARKET_ID));
-            } catch { /* skip unpackable */ }
-          }
-          accs = [...fromPositions];
+              return unpackMarketAcc(a.marketAcc).accountId === wantAccountId;
+            } catch { return false; }
+          });
+          res = { ...res, results: filteredByAccount };
 
-          if (accs.length === 0) {
+          if (filteredByAccount.length === 0) {
             return jsonResult({
-              message: 'Asset list unavailable and no active positions found. Pass marketAccs explicitly to query specific accounts.',
+              message: 'No funded marketAcc found under this (root, accountId). Pass marketAccs explicitly to query specific accounts.',
               accounts: [],
+              ...(res.syncStatus ? { syncStatus: res.syncStatus } : {}),
             });
           }
         } else {
-          accs = [...new Set(accs)];
+          const accs = [...new Set(marketAccs)];
+          res = await fetchWithRetry(() =>
+            openApiPost('/v1/accounts/market-acc-infos', { marketAccs: accs }),
+          );
         }
-
-        const res = await fetchWithRetry(() =>
-          openApiPost('/v1/accounts/market-acc-infos', { marketAccs: accs }),
-        );
 
         const rawAccounts = Array.isArray(res) ? res : (res.results ?? [res]);
         const assetMap = await safeAssetMap();
@@ -440,7 +432,7 @@ export function registerAccountPositionsTools(server: McpServer) {
           enteredMarkets: sorted,
           _context: {
             isMatured: 'true → market reached maturity. The calldata-builder currently REJECTS exit on matured markets ("Market X is expired"), so they stay in the entered list until the protocol path is opened. false → exit requires zero position size AND zero open limit orders.',
-            relatedTools: 'enter_exit_markets to enter or exit. get_positions for position size per market. get_limit_orders for open limit orders.',
+            relatedTools: 'enter_exit_markets to enter or exit. get_positions for position size per market. get_orders for open orders.',
           },
         });
       } catch (err) {

@@ -22,13 +22,13 @@ export function registerCancelTools(server: McpServer) {
     'cancel_orders',
     {
       annotations: { destructiveHint: true },
-      description: 'Cancel one or more limit orders on a market. Provide specific orderIds or set cancelAll to true. Stale-id handling: with `atomic:false` the on-chain bulkCancels silently skips ids that are filled/cancelled. With `atomic:true` the contract reverts on any unknown id. The backend pre-flight simulator may also reject the whole batch when an id is unknown to its state — observed inconsistently in 2026-Q2 testing, so the safest pattern is still to filter stale ids client-side via get_limit_orders before calling, especially under atomic:true. `cancelledCount` reflects the number of orders actually removed from the book (computed from the active-orders diff), NOT the request size.',
+      description: 'Cancel one or more limit orders on a market. Provide specific orderIds or set cancelAll to true. Stale-id handling: with `atomic:false` the on-chain bulkCancels silently skips ids that are filled/cancelled. With `atomic:true` the contract reverts on any unknown id. The backend pre-flight simulator may also reject the whole batch when an id is unknown to its state — observed inconsistently in 2026-Q2 testing, so the safest pattern is still to filter stale ids client-side via get_orders before calling, especially under atomic:true. `cancelledCount` reflects the number of orders actually removed from the book (computed from the active-orders diff), NOT the request size.',
       inputSchema: {
         marketId: marketIdField(),
         orderIds: z.array(z.string().regex(/^\d+$/, 'orderId must be a numeric string')).optional().describe('Array of order ID strings to cancel. Mutually exclusive with cancelAll:true.'),
         cancelAll: z.boolean().default(false).describe('Cancel all open orders on this market. Mutually exclusive with orderIds.'),
         marginMode: marginModeField(),
-        atomic: z.boolean().default(true).describe('true (default): whole batch reverts if any cancel fails (and the contract treats any unknown id as failure). false: best-effort on-chain — stale ids are silently skipped. The backend pre-flight simulator can still reject a mixed-stale batch under either setting; pre-filter stale ids via get_limit_orders for reliable MM workflows.'),
+        atomic: z.boolean().default(true).describe('true (default): whole batch reverts if any cancel fails (and the contract treats any unknown id as failure). false: best-effort on-chain — stale ids are silently skipped. The backend pre-flight simulator can still reject a mixed-stale batch under either setting; pre-filter stale ids via get_orders for reliable MM workflows.'),
       },
     },
     withAuth(async ({ marketId, orderIds, cancelAll, marginMode, atomic }, { rootAddress }) => {
