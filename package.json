@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "changeset": "changeset",
     "version": "changeset version",
-    "release": "yarn npm publish --tolerate-republish",
+    "release": "yarn npm publish",
     "prepack": "yarn build"
   },
   "files": [
