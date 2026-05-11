@@ -60,9 +60,15 @@ type IncludeSchemaOpts<T extends string> = {
 // "Extra <noun> beyond default (<defaults>). Use \"all\" for everything. Options: <optional>."
 export function includeFieldSchema<T extends string>(opts: IncludeSchemaOpts<T>) {
   const { defaults, optional, noun = 'fields', describeExtra } = opts;
-  const enumValues = [INCLUDE_ALL, ...optional] as [string, ...string[]];
+  const seen = new Set<string>();
+  const enumValues = [INCLUDE_ALL, ...defaults, ...optional].filter((v) => {
+    if (seen.has(v)) return false;
+    seen.add(v);
+    return true;
+  }) as [string, ...string[]];
   const desc =
     `Extra ${noun} beyond default (${defaults.join(', ') || '—'}). ` +
+    `Default fields are always returned; passing them here is a no-op. ` +
     `Use "all" for everything. Options: ${optional.join(', ')}.` +
     (describeExtra ? ` ${describeExtra}` : '');
   return z.array(z.enum(enumValues)).optional().describe(desc);
