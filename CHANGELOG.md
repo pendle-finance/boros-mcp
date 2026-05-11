@@ -1,5 +1,11 @@
 # @pendle/boros-mcp
 
+## 0.1.2
+
+### Patch Changes
+
+- 24201f3: fix: Properly set env for workflows
+
 ## 0.1.1
 
 ### Patch Changes
