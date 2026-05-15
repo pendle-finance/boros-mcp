@@ -7,7 +7,7 @@ import { ROUTER_SELECTORS } from '../../chain/selectors.js';
 import { jsonResult, analyzeExecution } from '../../utils.js';
 import { catchToErrorContent, errorContent, BorosErrorCode } from '../../agent/errors.js';
 import { marginModeField, marketIdField } from '../_schemas.js';
-import { getMarketInfo, resolveMarketAcc } from './_market.js';
+import { getMarketInfo, resolveMarketAcc, assertMarginModeAllowed } from './_market.js';
 import {
   executeAgentAction,
   extractCalldatas,
@@ -46,6 +46,8 @@ export function registerCancelTools(server: McpServer) {
         }
 
         const market = await getMarketInfo(marketId);
+        const marginErr = assertMarginModeAllowed(market, marginMode, marketId);
+        if (marginErr) return errorContent(BorosErrorCode.INVALID_PARAMS, marginErr);
         const tokenId: number = market.tokenId;
         const marketAcc = resolveMarketAcc(rootAddress, accountId, tokenId, marginMode, marketId);
         const marketNameRaw: string | undefined = market.imData?.name;

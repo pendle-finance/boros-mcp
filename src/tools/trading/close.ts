@@ -33,6 +33,7 @@ import {
   resolveMarketAcc,
   resolveCollateralSymbol,
   resolveActivePosition,
+  assertMarginModeAllowed,
 } from './_market.js';
 import {
   executeAgentAction,
@@ -86,6 +87,8 @@ SLIPPAGE: optional — defaults per-market to 0.5 × market.maxRateDeviation. Ef
         const accountId = DEFAULT_ACCOUNT_ID;
 
         const market = await getMarketInfo(marketId);
+        const marginErr = assertMarginModeAllowed(market, marginMode, marketId);
+        if (marginErr) return errorContent(BorosErrorCode.INVALID_PARAMS, marginErr);
         const tokenId: number = market.tokenId;
         const marketNameRaw: string | undefined = market.imData?.name;
         const marketSymbol: string | undefined = market.metadata?.underlyingSymbol;

@@ -32,6 +32,7 @@ import {
   resolveMarketAcc,
   snapshotActiveOrderIds,
   resolveRecentOrderIdsSinceSnapshot,
+  assertMarginModeAllowed,
 } from './_market.js';
 import {
   executeAgentAction,
@@ -194,6 +195,33 @@ SLIPPAGE: backend's place-orders DTO requires one of {desiredRate, slippage} per
                 .join('; ') +
               '.',
           );
+        }
+
+        for (let i = 0; i < entries.length; i++) {
+          const e: any = entries[i];
+          if (e.kind === 'single') {
+            const m = await getMarketInfo(e.marketId);
+            const err = assertMarginModeAllowed(m, e.marginMode, e.marketId);
+            if (err) {
+              return errorContent(
+                BorosErrorCode.INVALID_PARAMS,
+                `entries[${i}] (single): ${err}`,
+              );
+            }
+          } else {
+            const wantCross = Boolean(e.cross);
+            for (let j = 0; j < e.bulks.length; j++) {
+              const b: any = e.bulks[j];
+              const m = await getMarketInfo(b.marketId);
+              const err = assertMarginModeAllowed(m, wantCross ? 'cross' : 'isolated', b.marketId);
+              if (err) {
+                return errorContent(
+                  BorosErrorCode.INVALID_PARAMS,
+                  `entries[${i}].bulks[${j}] (bulk, cross:${wantCross}): ${err} Use a separate entry with kind:'bulk', cross:false for this market.`,
+                );
+              }
+            }
+          }
         }
 
         const slippageDefaultedSingles: number[] = [];

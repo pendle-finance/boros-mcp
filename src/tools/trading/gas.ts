@@ -13,7 +13,7 @@ import {
   extractTxHash,
   executionErrorContent,
 } from './_execute.js';
-import { getMarketInfo } from './_market.js';
+import { getMarketInfo, assertMarginModeAllowed } from './_market.js';
 import { getAssetInfo } from '../../api/asset-cache.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { withAuth } from '../_with-auth.js';
@@ -36,6 +36,8 @@ export function registerGasTools(server: McpServer) {
 
         // Backend wants `amount` as BigInt string in token-native decimals — convert from USD.
         const market = await getMarketInfo(marketId);
+        const marginErr = assertMarginModeAllowed(market, marginMode, marketId);
+        if (marginErr) return errorContent(BorosErrorCode.INVALID_PARAMS, marginErr);
         const tokenId: number = market.tokenId;
         const asset = await getAssetInfo(tokenId);
         const decimals: number = asset.decimals ?? 18;

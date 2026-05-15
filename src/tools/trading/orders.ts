@@ -34,6 +34,7 @@ import {
   resolveCollateralSymbol,
   snapshotActiveOrderIds,
   resolveRecentOrderIdsSinceSnapshot,
+  assertMarginModeAllowed,
 } from './_market.js';
 import {
   executeAgentAction,
@@ -86,10 +87,14 @@ If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
       },
     },
     withAuth(async ({ mode, marketId, side, size, orderType, limitApr, marginMode, slippage, timeInForce, includeAmm, acknowledgeHighRate }, { rootAddress }) => {
+      let isIsolatedOnlyMarket = false;
       try {
         const accountId = DEFAULT_ACCOUNT_ID;
 
         const market = await getMarketInfo(marketId);
+        isIsolatedOnlyMarket = Boolean(market?.imData?.isIsolatedOnly);
+        const marginErr = assertMarginModeAllowed(market, marginMode, marketId);
+        if (marginErr) return errorContent(BorosErrorCode.INVALID_PARAMS, marginErr);
         const tokenId: number = market.tokenId;
         const marketNameRaw: string | undefined = market.imData?.name;
         const marketSymbol: string | undefined = market.metadata?.underlyingSymbol;
@@ -322,9 +327,12 @@ If execute fails with "Insufficient gas balance", top up via pay_gas first.`,
         if (marginMode === 'isolated') {
           const msg = err instanceof Error ? err.message : String(err);
           if (/MMInsufficientMinCash/.test(msg)) {
+            const crossFallback = isIsolatedOnlyMarket
+              ? ''
+              : `, or retry with marginMode:"cross"`;
             return errorContent(
               BorosErrorCode.INSUFFICIENT_MARGIN,
-              `Isolated bucket on market ${marketId} has insufficient cash for this trade. Top up via cash_transfer({direction:"cross_to_isolated", marketId:${marketId}, humanAmount:<usd>}) first, or retry with marginMode:"cross".`,
+              `Isolated bucket on market ${marketId} has insufficient cash for this trade. Top up via cash_transfer({direction:"cross_to_isolated", marketId:${marketId}, humanAmount:<usd>}) first${crossFallback}.`,
             );
           }
         }
