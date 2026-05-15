@@ -5,6 +5,7 @@ import { openApiPost } from '../../api/open-api.js';
 import { type IntentExpectation } from '../../agent/signing.js';
 import { ROUTER_SELECTORS } from '../../chain/selectors.js';
 import { jsonResult } from '../../utils.js';
+import { BOROS_INTERNAL_DECIMALS, humanToRaw } from '../../lib/format/amount.js';
 import { catchToErrorContent, errorContent, BorosErrorCode } from '../../agent/errors.js';
 import { marketIdField, marginModeField } from '../_schemas.js';
 import {
@@ -34,30 +35,29 @@ export function registerGasTools(server: McpServer) {
       try {
         const accountId = DEFAULT_ACCOUNT_ID;
 
-        // Backend wants `amount` as BigInt string in token-native decimals — convert from USD.
+        // Backend payTreasury wires `amount` in Boros internal X18 (1e18 = 1 token of collateral),
+        // NOT the ERC-20 native decimals — payTreasury is a pure-internal move (cash bucket → gas
+        // budget) and never touches the ERC-20, so the asset's `decimals` (USDT0=6, WBTC=8, …) is
+        // irrelevant for the wire. Convert USD → token amount via spot price, then scale by 1e18.
         const market = await getMarketInfo(marketId);
         const marginErr = assertMarginModeAllowed(market, marginMode, marketId);
         if (marginErr) return errorContent(BorosErrorCode.INVALID_PARAMS, marginErr);
         const tokenId: number = market.tokenId;
         const asset = await getAssetInfo(tokenId);
-        const decimals: number = asset.decimals ?? 18;
         const usdPriceStr = asset.usdPrice;
         const usdPrice = usdPriceStr !== undefined ? Number(usdPriceStr) : NaN;
         if (!Number.isFinite(usdPrice) || usdPrice <= 0) {
           return errorContent(
             BorosErrorCode.UNKNOWN,
-            `Could not resolve a valid USD price for tokenId ${tokenId} (asset.usdPrice=${usdPriceStr ?? 'undefined'}). Cannot convert USD amount to token-native units.`,
+            `Could not resolve a valid USD price for tokenId ${tokenId} (asset.usdPrice=${usdPriceStr ?? 'undefined'}). Cannot convert USD amount to X18 cash units.`,
           );
         }
         const tokenAmountFloat = amount / usdPrice;
-        // Float math safe — USD top-up size rarely > 1e6 → precision through 10^decimals holds.
-        const tokenAmountRaw = BigInt(
-          Math.round(tokenAmountFloat * Math.pow(10, decimals)),
-        ).toString();
+        const tokenAmountRaw = humanToRaw(tokenAmountFloat, BOROS_INTERNAL_DECIMALS);
         if (tokenAmountRaw === '0') {
           return errorContent(
             BorosErrorCode.INVALID_PARAMS,
-            `USD amount ${amount} converts to 0 token-native units at price ${usdPrice} (decimals=${decimals}). Increase amount.`,
+            `USD amount ${amount} converts to 0 X18 units at price ${usdPrice}. Increase amount.`,
           );
         }
 

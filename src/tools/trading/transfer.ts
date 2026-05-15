@@ -9,6 +9,7 @@ import {
   enrichAmount,
   resolveAmount,
 } from '../../utils.js';
+import { BOROS_INTERNAL_DECIMALS } from '../../lib/format/amount.js';
 import { catchToErrorContent, errorContent, BorosErrorCode } from '../../agent/errors.js';
 import { tryBigInt } from './_helpers.js';
 import { getMarketInfo } from './_market.js';
@@ -30,7 +31,9 @@ export function registerTransferTools(server: McpServer) {
       annotations: { destructiveHint: true },
       description: `INTERNAL margin move between your own cross and isolated buckets on Boros. NOT an ERC-20 transfer — there is no recipient address. To move funds out of Boros use \`withdraw\`; to deposit fresh tokens use \`deposit\`; to top up gas budget use \`pay_gas\`.
 
-Default mode is 'simulate' — ALWAYS run mode:'simulate' first to preview pre/post margin state, show the user, then ONLY call mode:'execute' AFTER confirmation. Execute requires gas budget; top up via pay_gas if needed.`,
+Default mode is 'simulate' — ALWAYS run mode:'simulate' first to preview pre/post margin state, show the user, then ONLY call mode:'execute' AFTER confirmation. Execute requires gas budget; top up via pay_gas if needed.
+
+AMOUNT UNITS: prefer \`humanAmount\` (token units, e.g. 20 = 20 USDC) over \`amount\` to avoid scale mistakes. Boros stores ALL collateral cash in 18-dec internal units regardless of the token's ERC-20 decimals (USDC/USDT0=6dec on-chain, but tracked as X18 inside Boros), and cash_transfer is a purely internal move between buckets — the on-chain \`signedAmount\` is in X18 (1e18 = 1 USDT0 / 1 WETH / 1 of any collateral). The \`amount\` field on this tool is the raw X18 integer (NOT token-native wei). Use \`humanAmount\` for the human-readable value and the MCP scales by 1e18 internally. \`humanAmount\` is denominated in TOKEN UNITS, NOT USD — for non-stablecoin collateral like WETH this is units of the token, not dollars. Provide exactly one of the two.`,
       inputSchema: {
         mode: z
           .enum(['simulate', 'execute'])
@@ -40,8 +43,14 @@ Default mode is 'simulate' — ALWAYS run mode:'simulate' first to preview pre/p
         direction: z
           .enum(['cross_to_isolated', 'isolated_to_cross'])
           .describe('Transfer direction'),
-        amount: z.string().optional().describe('Raw token amount to transfer'),
-        humanAmount: z.number().optional().describe('Human-readable amount to transfer (e.g. 100.5)'),
+        amount: z
+          .string()
+          .optional()
+          .describe('Raw X18 integer (Boros internal cash unit; 1e18 = 1 token of the collateral, regardless of the ERC-20 native decimals). For 20 USDT0 pass "20000000000000000000". Prefer `humanAmount` unless you already have the X18 wire value. Mutually exclusive with humanAmount.'),
+        humanAmount: z
+          .number()
+          .optional()
+          .describe('Amount in TOKEN UNITS (e.g. 20 = 20 USDT0, 0.5 = 0.5 WETH). NOT USD — for non-stablecoin collateral this is units of the token. MCP scales by 1e18 for the X18 wire. Mutually exclusive with amount.'),
       },
     },
     withAuth(async ({ mode, marketId, direction, amount, humanAmount }, { rootAddress }) => {
@@ -54,9 +63,12 @@ Default mode is 'simulate' — ALWAYS run mode:'simulate' first to preview pre/p
         const marketSymbol: string | undefined = market.metadata?.underlyingSymbol;
 
         const asset = await getAssetInfo(tokenId);
-        const decimals = asset.decimals;
         const assetSymbol: string = asset.symbol;
-        const transferAmount = resolveAmount(amount, humanAmount, decimals);
+        // cash_transfer.signedAmount is wired in Boros internal X18 (1e18 = 1 token), NOT the
+        // collateral's ERC-20 native decimals — deposit/withdraw cross the wallet boundary so they
+        // scale by asset.decimals, but cash_transfer is a pure-internal move (bucket → bucket) and
+        // the contract reads the value directly. Scale humanAmount by 1e18.
+        const transferAmount = resolveAmount(amount, humanAmount, BOROS_INTERNAL_DECIMALS);
 
         const directionStr = direction === 'cross_to_isolated' ? 'CROSS_TO_ISOLATED' : 'ISOLATED_TO_CROSS';
 
@@ -72,22 +84,18 @@ Default mode is 'simulate' — ALWAYS run mode:'simulate' first to preview pre/p
           );
 
           // Pre-flight overdraft check — backend sim happily diffs balances even when the user
-          // doesn't have the funds, so the failure only surfaces at execute. Compare in 18-dec
-          // internal cash units (sim's pre is netBalance in 18-dec; transferAmount is native).
+          // doesn't have the funds, so the failure only surfaces at execute. Both transferAmount
+          // and sim's preUserState.collateralBalance are X18, so the comparison is direct.
           try {
             const sourceLeg =
               direction === 'cross_to_isolated' ? sim?.crossAccState : sim?.isolatedAccState;
             const preBalanceRaw = sourceLeg?.preUserState?.collateralBalance;
             if (preBalanceRaw !== undefined && preBalanceRaw !== null) {
               const preBalance18 = BigInt(preBalanceRaw);
-              const scaleExp = 18 - decimals;
-              const requested18 =
-                scaleExp >= 0
-                  ? BigInt(transferAmount) * 10n ** BigInt(scaleExp)
-                  : BigInt(transferAmount) / 10n ** BigInt(-scaleExp);
+              const requested18 = BigInt(transferAmount);
               if (requested18 > preBalance18) {
-                const humanReq = enrichAmount(transferAmount, decimals, assetSymbol).humanAmount;
-                const humanPre = (Number(preBalance18) / 1e18).toFixed(decimals);
+                const humanReq = enrichAmount(transferAmount, BOROS_INTERNAL_DECIMALS, assetSymbol).humanAmount;
+                const humanPre = enrichAmount(preBalance18.toString(), BOROS_INTERNAL_DECIMALS, assetSymbol).humanAmount;
                 return errorContent(
                   BorosErrorCode.INVALID_PARAMS,
                   `Insufficient ${direction === 'cross_to_isolated' ? 'cross' : 'isolated'} balance: requested ${humanReq} ${assetSymbol}, available ~${humanPre} ${assetSymbol}.`,
@@ -104,7 +112,7 @@ Default mode is 'simulate' — ALWAYS run mode:'simulate' first to preview pre/p
             ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
             marketSymbol,
             direction,
-            humanAmount: enrichAmount(transferAmount, decimals, assetSymbol).humanAmount,
+            humanAmount: enrichAmount(transferAmount, BOROS_INTERNAL_DECIMALS, assetSymbol).humanAmount,
             symbol: assetSymbol,
             simulation: sim,
             nextTool: {
@@ -179,7 +187,7 @@ Default mode is 'simulate' — ALWAYS run mode:'simulate' first to preview pre/p
           ...(marketNameRaw ? { marketName: marketNameRaw } : {}),
           marketSymbol,
           direction,
-          ...enrichAmount(transferAmount, decimals, assetSymbol),
+          ...enrichAmount(transferAmount, BOROS_INTERNAL_DECIMALS, assetSymbol),
           execution: result,
         });
       } catch (err) {
