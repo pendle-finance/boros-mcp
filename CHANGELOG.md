@@ -1,5 +1,11 @@
 # @pendle/boros-mcp
 
+## 0.1.5
+
+### Patch Changes
+
+- 0b73ebe: fix unit scaling bugs
+
 ## 0.1.4
 
 ### Patch Changes
