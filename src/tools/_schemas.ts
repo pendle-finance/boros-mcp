@@ -104,7 +104,7 @@ export function slippageField(notes?: string) {
 
 export function marginModeField(notes?: string) {
   const base =
-    'Margin mode. cross (default): one bucket per (root, accountId, tokenId) — shared across all entered markets for that token. isolated: per-market bucket keyed by marketId, walled off from cross. Move funds via cash_transfer.';
+    "Margin mode. cross (default): one bucket per (root, accountId, tokenId) — shared across all entered markets for that token. isolated: per-market bucket keyed by marketId, walled off from cross. Move funds via cash_transfer. Some markets are isolated-only (`isIsolatedOnly:true` in get_markets) and reject cross — pass `'isolated'` for those.";
   return z.enum(['cross', 'isolated']).default('cross').describe(appendNotes(base, notes));
 }
 

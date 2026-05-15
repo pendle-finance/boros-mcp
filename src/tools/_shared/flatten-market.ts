@@ -29,6 +29,7 @@ export const FLATTEN_MARKET_DEFAULT_FIELDS = [
   'maturity',
   'maturityIso',
   'isMatured',
+  'isIsolatedOnly',
   'underlyingSymbol',
   'markApr',
   'volume24h',
@@ -72,6 +73,7 @@ export function flattenMarket(m: unknown): FlattenedMarket {
   const extConfig = (raw.extConfig ?? {}) as Record<string, unknown>;
 
   const maturity = imData.maturity as number | undefined;
+  const isIsolatedOnly = imData.isIsolatedOnly as boolean | undefined;
   const nextSettlement = data.nextSettlementTime as number | undefined;
   const ttm = data.timeToMaturity as number | undefined;
   // imData.name is the full label (e.g. "Hyperliquid ETH 26 Jun 2026"); imData.marketName is legacy.
@@ -93,6 +95,7 @@ export function flattenMarket(m: unknown): FlattenedMarket {
     maturity,
     maturityIso: maturity ? new Date(maturity * 1000).toISOString() : undefined,
     isMatured,
+    isIsolatedOnly,
     underlyingSymbol: metadata.underlyingSymbol,
     fundingRateSymbol: metadata.fundingRateSymbol,
     ammId: resolvedAmmId,

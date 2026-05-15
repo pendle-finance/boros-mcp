@@ -29,6 +29,17 @@ export async function getMarketInfo(marketId: number): Promise<any> {
   });
 }
 
+export function assertMarginModeAllowed(
+  market: any,
+  marginMode: string | undefined,
+  marketId: number,
+): string | null {
+  if (market?.imData?.isIsolatedOnly && marginMode !== 'isolated') {
+    return `Market ${marketId} is isolated-only — retry with marginMode:'isolated'. Cross margin not supported on this market. Fund the isolated bucket via cash_transfer({direction:'cross_to_isolated', marketId:${marketId}, humanAmount:<usd>}) if it's empty.`;
+  }
+  return null;
+}
+
 // Picks CROSS_MARKET_ID for cross, actual marketId for isolated.
 export function resolveMarketAcc(
   root: Address,
