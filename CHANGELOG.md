@@ -1,5 +1,11 @@
 # @pendle/boros-mcp
 
+## 0.1.4
+
+### Patch Changes
+
+- c156860: improve handling for isolated markets
+
 ## 0.1.3
 
 ### Patch Changes
