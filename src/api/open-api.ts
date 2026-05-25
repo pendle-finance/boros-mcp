@@ -1,4 +1,15 @@
 import { OPEN_API_URL } from '../config.js';
+import { readFileSync } from 'node:fs';
+
+const PKG_VERSION: string = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
+  } catch {
+    return 'unknown';
+  }
+})();
+
+const CLIENT_HEADER = `boros-mcp/${PKG_VERSION}`;
 
 /** GET from open-api with query params. Returns parsed .data or full JSON. */
 export async function openApiGet(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<any> {
@@ -8,7 +19,7 @@ export async function openApiGet(path: string, params?: Record<string, string | 
       if (v !== undefined) url.searchParams.set(k, String(v));
     }
   }
-  const res = await fetch(url.toString());
+  const res = await fetch(url.toString(), { headers: { 'X-Client': CLIENT_HEADER } });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     const err = new Error(`API ${res.status}: ${res.statusText} — ${body}`);
@@ -24,7 +35,7 @@ export async function openApiGet(path: string, params?: Record<string, string | 
 export async function openApiPost(path: string, body: unknown): Promise<any> {
   const res = await fetch(`${OPEN_API_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Client': CLIENT_HEADER },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
