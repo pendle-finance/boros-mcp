@@ -1,5 +1,11 @@
 # @pendle/boros-mcp
 
+## 0.1.6
+
+### Patch Changes
+
+- e34a116: Add simulate_place_order tool to simulate place order without agent
+
 ## 0.1.5
 
 ### Patch Changes
