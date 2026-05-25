@@ -6,6 +6,7 @@ import { registerTransferTools } from './transfer.js';
 import { registerGasTools } from './gas.js';
 import { registerBulkTools } from './bulk.js';
 import { registerMarketsTools } from './markets.js';
+import { registerPreviewTools } from './preview.js';
 
 export function registerTradingTools(server: McpServer) {
   registerOrderTools(server);
@@ -15,4 +16,5 @@ export function registerTradingTools(server: McpServer) {
   registerGasTools(server);
   registerBulkTools(server);
   registerMarketsTools(server);
+  registerPreviewTools(server);
 }
