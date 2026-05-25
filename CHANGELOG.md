@@ -1,5 +1,11 @@
 # @pendle/boros-mcp
 
+## 0.1.7
+
+### Patch Changes
+
+- 5d8d8f0: Improve logging
+
 ## 0.1.6
 
 ### Patch Changes
