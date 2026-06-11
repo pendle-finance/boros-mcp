@@ -180,6 +180,19 @@ All optional.
 - Pendle: <https://pendle.finance>
 - MCP: <https://modelcontextprotocol.io>
 
+### Boros documentation
+
+The server also surfaces these via the `boros_glossary` tool (`docs` field) so the model knows where to read more:
+
+- Introduction: <https://docs.pendle.finance/boros-dev/Introduction>
+- Lite paper: <https://docs.pendle.finance/boros-dev/LitePaper>
+- FAQ: <https://docs.pendle.finance/boros-dev/FAQ>
+- Settlement: <https://docs.pendle.finance/boros-dev/Mechanics/Settlement>
+- Indicators: <https://docs.pendle.finance/boros-dev/Backend/indicators>
+- Historical data: <https://docs.pendle.finance/boros-dev/Backend/historical-data>
+- Glossary: <https://docs.pendle.finance/boros-dev/Backend/glossary>
+- **Bulk historical data archive**: <https://historical-data.boros.finance> — OHLCV, trades, order book, settlement and underlying-funding history as ZIP-compressed NDJSON (`/files.json` manifest), refreshed every 2–3 days. For long-range/offline analysis beyond what the live `get_market_*` tools return per call.
+
 ## License
 
 MIT

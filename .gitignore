@@ -3,6 +3,7 @@ node_modules/
 .claude
 CLAUDE.md
 opencode.json
+.mcp.json
 
 .yarn/*
 !.yarn/patches
