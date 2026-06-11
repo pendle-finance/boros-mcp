@@ -21,7 +21,8 @@ export function registerMarketsChartTools(server: McpServer): void {
 Use this for trade-rate trend analysis. Empty buckets are FORWARD-FILLED with the previous close and volume=0; those rows are flagged with synthetic=true so an LLM doesn't read them as low-volatility periods.
 Do NOT use this for individual trade details — use get_market_trades instead.
 For indicator overlays (underlying APR, future premium, fear & greed, funding-rate MAs), use get_market_indicators.
-Pagination (max 50 candles per call): to fetch older history, set endTimestamp = (oldest timestamp from prior page) - 1 and either pass startTimestamp = endTimestamp - 50 * timeFrameSeconds, or omit startTimestamp and the backend returns up to 50 candles ending at endTimestamp. Timeframe seconds: 5m=300, 1h=3600, 1d=86400, 1w=604800.`,
+Pagination (max 50 candles per call): to fetch older history, set endTimestamp = (oldest timestamp from prior page) - 1 and either pass startTimestamp = endTimestamp - 50 * timeFrameSeconds, or omit startTimestamp and the backend returns up to 50 candles ending at endTimestamp. Timeframe seconds: 5m=300, 1h=3600, 1d=86400, 1w=604800.
+For bulk/long-range history (months of candles) instead of paging this API, download the archive: https://historical-data.boros.finance (GET /files.json for the manifest; see boros_glossary docs.historicalDataArchive).`,
       inputSchema: {
         marketId: marketIdField(),
         timeFrame: timeFrameField({ defaultValue: '1h' }),

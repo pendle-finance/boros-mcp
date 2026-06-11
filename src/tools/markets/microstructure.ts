@@ -16,7 +16,7 @@ export function registerMarketsMicrostructureTools(server: McpServer): void {
       annotations: { readOnlyHint: true },
       description: `Get the order book for a market, showing aggregated bid/ask levels at a given tick size.
 Use this to see current market depth, best bid/ask, and liquidity distribution.
-Do NOT use this for historical data — use get_market_ohlcv or get_market_trades instead.`,
+Do NOT use this for historical data — use get_market_ohlcv or get_market_trades instead. For bulk historical order-book snapshots, download the archive: https://historical-data.boros.finance (see boros_glossary docs.historicalDataArchive).`,
       inputSchema: {
         marketId: marketIdField(),
         tickSize: z
@@ -111,7 +111,7 @@ Do NOT use this for historical data — use get_market_ohlcv or get_market_trade
       annotations: { readOnlyHint: true },
       description: `Get recent executed trades on a market (public, anonymous tape — no trader address). Sorted newest-first.
 Use this to see the most recent fills (size, rate, timestamp). Multiple rows can share a txHash — those are partial fills against different price levels.
-Do NOT use this to look up YOUR trades — use get_transaction_history. Do NOT use this for candlestick/OHLCV data — use get_market_ohlcv instead.`,
+Do NOT use this to look up YOUR trades — use get_transaction_history. Do NOT use this for candlestick/OHLCV data — use get_market_ohlcv instead. For the full historical trade tape (months), download the archive: https://historical-data.boros.finance (see boros_glossary docs.historicalDataArchive).`,
       inputSchema: {
         marketId: marketIdField(),
         limit: paginationLimitField({ max: 50, defaultValue: 20, desc: 'Max trades to return (default 20, max 50)' }),
