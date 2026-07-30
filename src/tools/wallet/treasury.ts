@@ -38,8 +38,8 @@ export function registerVaultPayTreasuryTool(server: McpServer) {
         );
 
         // Pass token-native decimals — IERC20.safeTransferFrom consumes unscaled amount;
-        // MarketHubEntry.vaultPayTreasury _toScaled-converts internally. Backend DTO docstring
-        // saying "scaled by 10^18" is incorrect; on-chain contract is the source of truth.
+        // MarketHubEntry.vaultPayTreasury _toScaled-converts internally. Matches the backend DTO,
+        // which documents native decimals too.
         const calldata = await fetchWithRetry(() =>
           openApiPost('/v1/calldata-builder/user/vault-pay-treasury', {
             root,

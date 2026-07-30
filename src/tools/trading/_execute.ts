@@ -17,7 +17,12 @@ export function extractCalldatas(res: any): Hex[] {
 export function extractTxHash(result: any): string | undefined {
   const top = result?.txHash;
   if (typeof top === 'string' && top.length > 0) return top;
-  const entries: any[] = Array.isArray(result?.execution) ? result.execution : [];
+  // send-txs-bot returns a BARE TxResponse[] — the {execution:[...]} form is the wrapped variant.
+  const entries: any[] = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.execution)
+      ? result.execution
+      : [];
   for (const e of entries) {
     if (e && typeof e.txHash === 'string' && e.txHash.length > 0) return e.txHash;
   }
@@ -127,4 +132,46 @@ export function assertPriceImpactWithinSlippage(
     );
   }
   return null;
+}
+
+/**
+ * Sibling of extractCalldatas for the 2 of 15 calldata-builder paths that answer with
+ * `{executeParams:[{calldata,accountId}]}` instead of `{calls:[...]}` — the AMM
+ * add/remove-liquidity agent routes. Those also PIN the account the batch must be signed as
+ * (255, the AMM sub-account), so the caller has to thread it into bulkSignWithAgent instead of
+ * assuming DEFAULT_ACCOUNT_ID. Validates every entry and throws rather than sign garbage.
+ * Kept separate from extractCalldatas so widening this shape can't affect its 8 `{calls}` callers.
+ */
+export function extractExecuteParams(res: any): { calldatas: Hex[]; accountId: number } {
+  const ep = res?.executeParams;
+  if (!Array.isArray(ep) || ep.length === 0) {
+    throw new Error(
+      'Unexpected calldata response shape — expected { executeParams: [{ calldata, accountId }, ...] }',
+    );
+  }
+  const calldatas: Hex[] = [];
+  const ids = new Set<number>();
+  for (let i = 0; i < ep.length; i++) {
+    const accountId = ep[i]?.accountId;
+    const calldata = ep[i]?.calldata;
+    if (typeof accountId !== 'number' || !Number.isInteger(accountId)) {
+      throw new Error(
+        `Refusing to sign: executeParams[${i}].accountId is not an integer (got ${JSON.stringify(accountId)})`,
+      );
+    }
+    if (typeof calldata !== 'string' || !/^0x[0-9a-fA-F]{8,}$/.test(calldata)) {
+      throw new Error(
+        `Refusing to sign: executeParams[${i}].calldata is not a non-empty 0x-prefixed hex string`,
+      );
+    }
+    ids.add(accountId);
+    calldatas.push(calldata as Hex);
+  }
+  // One EIP-712 message carries one packed account, so a batch spanning accounts is unsignable here.
+  if (ids.size !== 1) {
+    throw new Error(
+      `Refusing to sign: executeParams span multiple accountIds (${[...ids].join(', ')}) — a single signing account is required`,
+    );
+  }
+  return { calldatas, accountId: [...ids][0] };
 }

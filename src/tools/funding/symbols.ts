@@ -43,9 +43,9 @@ export function registerFundingSymbolsTools(server: McpServer): void {
           ...(filterApplied ? { totalBeforeFilter } : {}),
           fundingRateSymbols: filtered,
           _context: {
-            fundingRateSymbol: 'Exchange-specific perp ticker (e.g. BTCUSDT for Binance, BTC-USDT-SWAP for OKX, BTC for Hyperliquid). Use this string as the `fundingRateSymbol` join key against get_markets.metadata.fundingRateSymbol — NOT as a Boros marketId.',
-            assetSymbol: 'Underlying asset (e.g. BTC). Different scope from Boros collateral assets returned by get_assets.',
-            exchange: 'Source exchange. Casing is non-canonical — backend stores whatever was inserted at strategy-setup time (lowercase per OpenAPI example, sometimes capitalized in production, sometimes undefined for OKX). Do NOT case-sensitive filter; lowercase both sides before comparing.',
+            fundingRateSymbol: 'Opaque registry key, TWO shapes in production: Binance uses the venue\'s own uppercase perp ticker (BTCUSDT, ETHUSDT, XAUUSDT); every OTHER exchange uses a synthetic lowercase `venue-asset` key (okx-btc, hyperliquid-eth, bybit-sol, lighter-xau, deribit-xrp, gate-hype, kucoin-bnb, bitget-xag). Do NOT construct it — a venue\'s native contract name such as BTC-USDT-SWAP is NOT this field (that string is get_strategies.strategyMetadata.name). Copy it verbatim and join against get_markets.metadata.fundingRateSymbol; it is NOT a Boros marketId.',
+            assetSymbol: 'Underlying asset, uppercase (BTC, ETH, XAU, HYPE). Note the same underlying can appear under different `fundingRateSymbol` asset slugs across venues (Hyperliquid uses -gold/-silver where others use -xau/-xag), so join on fundingRateSymbol, not on assetSymbol. Different scope from Boros collateral assets returned by get_assets.',
+            exchange: 'Source exchange, ALWAYS populated (verified: 0 empty across 80 entries / 9 exchanges). Live values are capitalized display names: Binance, Bybit, OKX, Gate, Kucoin, Bitget, Deribit, Hyperliquid, Lighter. Casing is not contractual (the OpenAPI example shows lowercase), so lowercase both sides before comparing rather than matching these strings exactly.',
             cardinality: 'A single fundingRateSymbol typically maps to multiple Boros marketIds (one per maturity).',
           },
         });

@@ -35,12 +35,16 @@ Do NOT use this for historical data — use get_market_ohlcv or get_market_trade
             z
               .number({
                 invalid_type_error:
-                  'tickSize must be a positive number (e.g. 0.0001). Pass as a bare number (0.0001) or a numeric string ("0.0001") — wrapping quotes like "\\"0.0001\\"" are stripped automatically; non-numeric strings are rejected.',
+                  'tickSize must be one of 0.0001, 0.001, 0.01, 0.1. Pass as a bare number (0.0001) or a numeric string ("0.0001") — wrapping quotes like "\\"0.0001\\"" are stripped automatically; non-numeric strings are rejected.',
               })
-              .positive('tickSize must be > 0 (e.g. 0.00001, 0.0001, 0.001, 0.01, 0.1).'),
+              // Backend TickSize is a closed enum (order-book.schema.ts); anything else 400s.
+              .refine(
+                (v) => [0.0001, 0.001, 0.01, 0.1].includes(v),
+                'tickSize must be one of 0.0001, 0.001, 0.01, 0.1 (closed backend enum).',
+              ),
           )
           .default(0.001)
-          .describe('Tick size for order book aggregation as DECIMAL (0.001 = 0.1%). Pass as a bare positive number or numeric string. Common values: 0.00001, 0.0001, 0.001 (default), 0.01, 0.1.'),
+          .describe('Tick size for order book aggregation as DECIMAL (0.001 = 0.1%). Pass as a bare number or numeric string. Allowed values (closed backend enum): 0.0001, 0.001 (default), 0.01, 0.1.'),
         includeAmm: z
           .boolean()
           .default(true)
@@ -51,7 +55,7 @@ Do NOT use this for historical data — use get_market_ohlcv or get_market_trade
           .min(1)
           .max(100)
           .default(20)
-          .describe('Client-side trim of the top-N levels per side (default 20). The server has no `topN` parameter — this is applied locally after `minSize`. Note: when `includeAmm=true` AND the market has a live AMM (~⅓ of active markets), the server pre-caps at 50/side as part of the AMM merge, so values >50 have no effect on those markets. For non-AMM, AMM-disabled, or `includeAmm=false` markets, raise above 20 to inspect deeper rungs / dust tails.'),
+          .describe('Client-side trim of the top-N levels per side (default 20). The server has no `topN` parameter — this is applied locally after `minSize`. The server caps every response at 50 levels/side UNCONDITIONALLY, so values >50 never have any effect on any market. Raise above 20 (up to 50) to inspect deeper rungs / dust tails.'),
         minSize: z
           .number()
           .min(0)
@@ -96,7 +100,7 @@ Do NOT use this for historical data — use get_market_ohlcv or get_market_trade
             long: 'Resting orders willing to PAY fixed APR (receive the underlying/floating APR). A long position pays fixed and receives floating. Long quotes are sorted highest APR first; the highest APR is the best bid (the most a fixed-payer is willing to commit).',
             short: 'Resting orders willing to RECEIVE fixed APR (pay the underlying/floating APR). A short position receives fixed and pays floating. Short quotes are sorted lowest APR first; the lowest APR is the best ask.',
             bidAskMapping: 'long ≈ bid side (highest APR first); short ≈ ask side (lowest APR first). APRs may be negative for negative-funding-rate markets.',
-            depthCap: 'Server caps each side at 50 entries when `includeAmm=true` AND the market has a live AMM (the AMM merge step in `combineMarketOrderBookAndAMM` enforces this). Otherwise (no AMM / AMM disabled / cutoff / `includeAmm=false`) the raw orderbook flows through with no server-side cap. `topN` is a client-side trim applied after that.',
+            depthCap: 'Server caps each side at 50 levels UNCONDITIONALLY — `includeAmm`, AMM presence and the AMM merge step make no difference, because `formatBook`\'s own default is `limit = 50`. No response can ever exceed 50/side. Only a minority of active markets (5 of 37 at the time of writing, ~14%) have a live AMM, and those are the ones that actually saturate the 50/50 cap; plain-orderbook markets are typically well under it. `topN` is a client-side trim applied after that, so it can only reduce depth further.',
           },
         });
       } catch (err) {

@@ -96,6 +96,11 @@ For authenticated simulation with margin-mode, liquidation APR, and execution, u
 
         const unit = collateralSymbol ?? 'token';
         const matchedSizeZero = sim.matched && Number(formatSize(sim.matched.size)) === 0;
+        // Unguarded market order: when `rate` is omitted for FOK/IOC the backend resolves limitTick
+        // to the side's EXTREME tick (±32767), whose rate is ~25.49 and renders as "2548.6048%".
+        // That's a bound, not a quote — key on request intent, not on the tick value (a caller may
+        // legitimately request a rate that rounds to an extreme tick).
+        const unguarded = limitApr === undefined && (tif === 'FOK' || tif === 'IOC');
 
         return jsonResult({
           ok: true,
@@ -107,7 +112,7 @@ For authenticated simulation with margin-mode, liquidation APR, and execution, u
               ? {
                   size: formatSize(sim.matched.size),
                   sizeUnit: 'YU',
-                  cost: sim.matched.cost,
+                  cost: formatX18(sim.matched.cost),
                   costUnit: unit,
                   rate: sim.matched.rate,
                   ...enrichAprValue(sim.matched.rate),
@@ -134,7 +139,13 @@ For authenticated simulation with margin-mode, liquidation APR, and execution, u
             resolved: sim.resolved
               ? {
                   ...sim.resolved,
-                  actualRatePercent: enrichAprValue(sim.resolved.actualRate)?.aprPercent,
+                  ...(unguarded
+                    ? {
+                        actualRate: undefined,
+                        actualRatePercent: undefined,
+                        rateGuard: 'none — unguarded market order, fills at any rate. limitTick is the side\'s extreme bound, not a quoted rate; see matched.rate for the fill.',
+                      }
+                    : { actualRatePercent: enrichAprValue(sim.resolved.actualRate)?.aprPercent }),
                   ...(sim.resolved.requestedRate != null
                     ? { requestedRatePercent: enrichAprValue(sim.resolved.requestedRate)?.aprPercent }
                     : {}),

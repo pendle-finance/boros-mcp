@@ -17,7 +17,7 @@ import { APR_NOTE, AMOUNTS_IN_COLLATERAL_NOTE } from '../_context.js';
 
 import { safeAssetMap } from '../../api/asset-cache.js';
 import { fetchMarketMap } from '../../api/market-cache.js';
-import { catchToErrorContent } from '../../agent/errors.js';
+import { catchToErrorContent, errorContent, BorosErrorCode } from '../../agent/errors.js';
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { withAuth } from '../_with-auth.js';
 import { buildIncludeSet, projectFields, includeFieldSchema } from '../_shared/projection.js';
@@ -33,7 +33,10 @@ const PNL_HISTORY_DEFAULT_FIELDS = [
   'settlement',
   'cumulativeSettlementPnl',
 ] as const;
+// Wire keys of SettlementResponse (+ locally derived ones). It has no txHash / eventIndex / tokenId —
+// `id` is the dedup key.
 const PNL_HISTORY_OPTIONAL_FIELDS = [
+  'id',
   'marketAcc',
   'positionValue',
   'yieldPaid',
@@ -43,9 +46,6 @@ const PNL_HISTORY_OPTIONAL_FIELDS = [
   'settlementRate',
   'side',
   'timestamp',
-  'eventIndex',
-  'txHash',
-  'tokenId',
 ] as const;
 
 const TX_HISTORY_DEFAULT_FIELDS = [
@@ -60,18 +60,22 @@ const TX_HISTORY_DEFAULT_FIELDS = [
   'pnl',
   'fee',
 ] as const;
+// Wire keys of TransactionResponse (+ locally derived ones). Pre/post position is
+// prevPosition{S,F} / postPosition{S,F} — S = signed size, F = fixed-rate cost basis.
 const TX_HISTORY_OPTIONAL_FIELDS = [
+  'id',
   'marketAcc',
   'txHash',
-  'eventIndex',
+  'blockNumber',
   'timestamp',
   'tradeRate',
   'side',
   'orderId',
-  'positionPreSize',
-  'positionPostSize',
-  'positionPreSignedSize',
-  'positionPostSignedSize',
+  'isLimitOrderTrade',
+  'prevPositionS',
+  'postPositionS',
+  'prevPositionF',
+  'postPositionF',
 ] as const;
 
 const TRANSFER_LOG_DEFAULT_FIELDS = [
@@ -83,16 +87,15 @@ const TRANSFER_LOG_DEFAULT_FIELDS = [
   'fromType',
   'toType',
 ] as const;
+// Wire keys of TransferLogResponse (+ locally derived ones). It carries NO txHash, eventIndex,
+// requestId or cooldown timestamps — `transferLogId` is the dedup key, and a pending withdrawal's
+// cooldown end is not exposed by this endpoint at all.
 const TRANSFER_LOG_OPTIONAL_FIELDS = [
+  'transferLogId',
   'tokenId',
   'fromMarketId',
   'toMarketId',
-  'eventIndex',
-  'txHash',
   'blockTimestamp',
-  'requestId',
-  'cooldownEnd',
-  'cooldownEndIso',
 ] as const;
 
 export function registerAccountHistoryTools(server: McpServer) {
@@ -184,6 +187,7 @@ export function registerAccountHistoryTools(server: McpServer) {
             apr: APR_NOTE,
             amounts: AMOUNTS_IN_COLLATERAL_NOTE,
             cumulativeSettlementPnl: 'Excludes per-row `fee`. Sum of per-row `settlement` will differ by Σ fee.',
+            id: 'include:["id"] for the stable per-event de-duplication key. This endpoint returns no txHash and no event index.',
             sinceOpenSettlementPnl: '0 when the latest settlement predates the current open. Resets each time the position is reopened; cumulativeSettlementPnl persists.',
           },
         });
@@ -197,7 +201,7 @@ export function registerAccountHistoryTools(server: McpServer) {
     'get_transaction_history',
     {
       annotations: { readOnlyHint: true },
-      description: `Get historical trading FILLS (one record per fill: tradeSize, tradeRate, tradeValue, fee, realized pnl, txHash, pre/post position). Backed by GET /v1/accounts/position-update-events (requires marketAcc + marketId per request). Sorted newest-first by eventIndex. Behaviour: pass marketId to query that market (even if the position is closed or matured) — resumeToken pagination is only supported in single-market mode. Omit marketId and this tool iterates the user's ACTIVE positions only — closed markets are silently missing, so always pass marketId for historical/closed markets. Use cases this is NOT for: deposits/withdrawals (get_transfer_logs), funding settlements (get_pnl_history), order place/cancel events (get_on_chain_events), liquidation labels (get_liquidation_events). The V2 endpoint does not return txType/entryApr/pnlPercentage — liquidation fills are indistinguishable from normal fills here. All amount fields are 18-dec normalized human strings (Boros internal cash unit).`,
+      description: `Get historical trading FILLS (one record per fill: tradeSize, tradeRate, tradeValue, fee, realized pnl, txHash, maker/taker flag, and the pre/post position snapshot via include:["prevPositionS","postPositionS","prevPositionF","postPositionF"] — S = signed size, F = fixed-rate cost basis). Backed by GET /v1/accounts/position-update-events (requires marketAcc + marketId per request). Sorted newest-first by event index; de-duplicate on \`id\`. Behaviour: pass marketId to query that market (even if the position is closed or matured) — resumeToken pagination is only supported in single-market mode. Omit marketId and this tool iterates the user's ACTIVE positions only — closed markets are silently missing, so always pass marketId for historical/closed markets. Use cases this is NOT for: deposits/withdrawals (get_transfer_logs), funding settlements (get_pnl_history), order place/cancel events (get_on_chain_events), liquidation labels (get_liquidation_events). The V2 endpoint does not return txType/entryApr/pnlPercentage — liquidation fills are indistinguishable from normal fills here. All amount fields are 18-dec normalized human strings (Boros internal cash unit).`,
       inputSchema: {
         userAddress: userAddressField(),
         accountId: z
@@ -234,9 +238,13 @@ export function registerAccountHistoryTools(server: McpServer) {
 
         if (marketId !== undefined) {
           const mkt = marketMap.get(marketId);
-          const tokenId = mkt?.tokenId ?? 0;
+          // No tokenId 0 exists, so the old `?? 0` fallback packed a provably invalid marketAcc and
+          // queried it instead of reporting the unknown market.
+          if (mkt?.tokenId === undefined) {
+            return errorContent(BorosErrorCode.MARKET_NOT_FOUND, `Market ${marketId} not found`);
+          }
           const effectiveMarketId = marginMode === 'cross' ? CROSS_MARKET_ID : marketId;
-          const marketAcc = packMarketAcc(userAddress as Address, accountId ?? 0, tokenId, effectiveMarketId);
+          const marketAcc = packMarketAcc(userAddress as Address, accountId ?? 0, mkt.tokenId, effectiveMarketId);
           queries = [{ marketAcc, marketId }];
         } else {
           const positions = await fetchWithRetry(() =>
@@ -286,7 +294,10 @@ export function registerAccountHistoryTools(server: McpServer) {
           const includeSet = buildIncludeSet(include, TX_HISTORY_DEFAULT_FIELDS, TX_HISTORY_OPTIONAL_FIELDS);
           for (const tx of results) {
             const mkt = marketMap.get(tx.marketId ?? q.marketId);
-            const { side, tradeSize, tradeValue, fee, pnl } = tx;
+            const {
+              side, tradeSize, tradeValue, fee, pnl,
+              prevPositionS, postPositionS, prevPositionF, postPositionF,
+            } = tx;
             const full = {
               ...tx,
               ...(!singleMarket
@@ -302,6 +313,11 @@ export function registerAccountHistoryTools(server: McpServer) {
               ...(tradeValue !== undefined ? { tradeValue: formatX18(tradeValue) } : {}),
               ...(fee !== undefined ? { fee: formatX18(fee) } : {}),
               ...(pnl !== undefined ? { pnl: formatX18(pnl) } : {}),
+              // Wire ships these as raw 18-dec strings; format so one row uses one convention.
+              ...(prevPositionS !== undefined ? { prevPositionS: formatSize(prevPositionS) } : {}),
+              ...(postPositionS !== undefined ? { postPositionS: formatSize(postPositionS) } : {}),
+              ...(prevPositionF !== undefined ? { prevPositionF: formatX18(prevPositionF) } : {}),
+              ...(postPositionF !== undefined ? { postPositionF: formatX18(postPositionF) } : {}),
             };
             allTransactions.push(projectFields(full, includeSet));
           }
@@ -322,7 +338,8 @@ export function registerAccountHistoryTools(server: McpServer) {
           _context: {
             apr: APR_NOTE,
             amounts: AMOUNTS_IN_COLLATERAL_NOTE,
-            sortOrder: 'newest-first by eventIndex.',
+            sortOrder: 'newest-first by event index (not returned as a field — use `id` for de-duplication and `resumeToken` for paging).',
+            prePostPosition: 'include:["prevPositionS","postPositionS","prevPositionF","postPositionF"] for the pre/post position snapshot. `...S` = signed position SIZE in YU (positive long, negative short). `...F` = the position fixed-rate COST BASIS in collateral units. prev = before this fill, post = after. All four are formatted (already divided by 1e18).',
           },
         });
       } catch (err) {
@@ -418,6 +435,7 @@ export function registerAccountHistoryTools(server: McpServer) {
             status: 'pending (withdrawal cooldown), success, or failed (e.g. cancelled withdrawal)',
             amount: '18-dec normalized human string (Boros internal cash unit). amountSymbol identifies the underlying token but the value is NOT in token-native decimals.',
             transferType: 'Derived label: deposit, withdraw, cross_to_isolated, isolated_to_cross, isolated_to_isolated, vault_deposit (cross→amm), vault_withdraw (amm→cross).',
+            transferLogId: 'Stable per-event id — the de-duplication key when paging. include:["transferLogId"] to get it. This endpoint returns no txHash, no event index and no cooldown-end timestamp.',
             resumeToken: 'Pass this value as resumeToken to fetch the next page. Absent when there are no more results.',
           },
         });

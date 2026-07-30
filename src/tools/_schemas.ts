@@ -159,14 +159,15 @@ export function borosUnixTimestampField(label: string, desc?: string) {
 
 const TOKEN_ID_BASE = 'Collateral token ID (see get_assets).';
 
-// Default min=0: some endpoints accept tokenId=0 as a valid sentinel.
+// Default min=1: backend TokenIdApiParam is IsInt()+Min(1) on all 9 DTOs, and there is no token 0
+// (/v1/assets → 1-5; non-collateral rows report -1). 0 used to pass zod and 400 at the API.
 export function tokenIdField(notes?: string, opts?: { min?: number }) {
-  const min = opts?.min ?? 0;
+  const min = opts?.min ?? 1;
   return z.number().int().min(min).describe(appendNotes(TOKEN_ID_BASE, notes));
 }
 
 export function tokenIdFieldOptional(notes?: string, opts?: { min?: number }) {
-  const min = opts?.min ?? 0;
+  const min = opts?.min ?? 1;
   return z.number().int().min(min).optional().describe(appendNotes(TOKEN_ID_BASE, notes));
 }
 
@@ -205,11 +206,13 @@ export function timeFrameField(opts?: { defaultValue?: (typeof TIMEFRAME_VALUES)
 const UNIX_SECONDS_REFINE = (v: number) => v <= 1e12;
 const UNIX_SECONDS_REFINE_MSG = 'must be UNIX seconds, not milliseconds (saw a value > 1e12)';
 
+// min(1), not nonnegative: every consumer of the REQUIRED variant has @Min(1) server-side.
+// Do NOT copy this to the Optional variant below — ohlcv/indicators legitimately accept 0.
 export function unixTimestampField(label: string, desc?: string) {
   return z
     .number()
     .int()
-    .nonnegative()
+    .min(1, `${label} must be >= 1 (backend rejects 0)`)
     .refine(UNIX_SECONDS_REFINE, { message: `${label} ${UNIX_SECONDS_REFINE_MSG}` })
     .describe(desc ?? `${label} (Unix seconds; not milliseconds)`);
 }

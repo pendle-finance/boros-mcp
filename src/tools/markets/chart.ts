@@ -21,19 +21,19 @@ export function registerMarketsChartTools(server: McpServer): void {
 Use this for trade-rate trend analysis. Empty buckets are FORWARD-FILLED with the previous close and volume=0; those rows are flagged with synthetic=true so an LLM doesn't read them as low-volatility periods.
 Do NOT use this for individual trade details — use get_market_trades instead.
 For indicator overlays (underlying APR, future premium, fear & greed, funding-rate MAs), use get_market_indicators.
-Pagination (max 50 candles per call): to fetch older history, set endTimestamp = (oldest timestamp from prior page) - 1 and either pass startTimestamp = endTimestamp - 50 * timeFrameSeconds, or omit startTimestamp and the backend returns up to 50 candles ending at endTimestamp. Timeframe seconds: 5m=300, 1h=3600, 1d=86400, 1w=604800.
+Pagination (max 200 candles per call — the backend's own hard cap): to fetch older history pass BOTH endTimestamp = (oldest timestamp from prior page) - 1 AND startTimestamp = endTimestamp - 200 * timeFrameSeconds (5m=300, 1h=3600, 1d=86400, 1w=604800).
 For bulk/long-range history (months of candles) instead of paging this API, download the archive: https://historical-data.boros.finance (GET /files.json for the manifest; see boros_glossary docs.historicalDataArchive).`,
       inputSchema: {
         marketId: marketIdField(),
         timeFrame: timeFrameField({ defaultValue: '1h' }),
         limit: paginationLimitField({
-          max: 50,
+          max: 200,
           defaultValue: 50,
-          desc: 'Number of candles to return (default 50, max 50). Ignored when startTimestamp is provided. To page beyond 50, use endTimestamp; see tool description.',
+          desc: 'Number of candles to return (default 50, max 200 = the backend cap). Ignored when startTimestamp is provided. To reach older history, pass startTimestamp + endTimestamp; see tool description.',
         }),
         startTimestamp: unixTimestampFieldOptional(
           'startTimestamp',
-          'Start timestamp (Unix seconds; not milliseconds). When paging older history, set startTimestamp = endTimestamp - 50 * timeFrameSeconds.',
+          'Start timestamp (Unix seconds; not milliseconds). When paging older history, set startTimestamp = endTimestamp - 200 * timeFrameSeconds.',
         ),
         endTimestamp: unixTimestampFieldOptional(
           'endTimestamp',

@@ -27,9 +27,9 @@ Do NOT confuse with vault strategies or saved trade templates. Filter passes (ba
             description: 'Cross-market arbitrage candidates. Backend filter: aprTimesMaxLeverage > 0 AND daysToMaturity > 10. Sort: aprTimesMaxLeverage descending.',
             longMarket: 'Boros market to PAY fixed on (the long leg of the strategy). Quote it via place_order with side="long".',
             shortMarket: 'Boros market to RECEIVE fixed on (the short leg). Quote it via place_order with side="short".',
-            impliedAprSpread: 'impliedApr(longMarket) - impliedApr(shortMarket). Decimal.',
+            impliedAprSpread: 'abs(impliedApr(longMarket) - impliedApr(shortMarket)). Decimal, ALWAYS >= 0 — the backend takes Math.abs and always assigns the LOWER-APR leg as longMarket, so this equals impliedApr(shortMarket) - impliedApr(longMarket). Never negative; do not read the sign as a direction.',
             aprTimesMaxLeverage: 'Indicative ROI at the strategy-wide max leverage, net of fees and Boros margin requirements. Decimal (0.10 = 10%).',
-            maxPerpLeverage: 'Top-level field is the strategy-wide max leverage (calculateMaxPerpLeverage). longMarket.maxPerpLeverage / shortMarket.maxPerpLeverage are per-leg caps; use the top-level value when sizing the combined position.',
+            maxPerpLeverage: 'Top-level field is the strategy-wide max leverage (calculateMaxPerpLeverage). longMarket.maxPerpLeverage / shortMarket.maxPerpLeverage are per-leg caps; use the top-level value when sizing the combined position. The top-level value is additionally hard-capped at 10 — it is min(10, longLeg, shortLeg) — so it reads 10 whenever both legs allow 10x or more, even if a leg advertises 100x.',
           },
         });
       } catch (err) {

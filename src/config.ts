@@ -2,6 +2,9 @@ import path from 'node:path';
 import os from 'node:os';
 
 export const OPEN_API_URL = 'https://api-boros.pendle.finance/apis/';
+// apps/core surface (/v1/collaterals, /v1/configs) — not on open-api. Public (the Boros dapp reads
+// it) but self-described as "LEGACY — internal Core API … may change without notice".
+export const CORE_API_URL = 'https://api-boros.pendle.finance/core/';
 export const SEND_TXS_BOT_URL = 'https://api.boros.finance/send-txs-bot';
 
 export const CROSS_MARKET_ID = 16777215; // 2^24 - 1

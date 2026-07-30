@@ -1,7 +1,7 @@
 // Sim-echo formatter for simulate_order/place_order/simulate_close/close_position.
 // Drops raw preState; reshapes matched/postState. open-api close-position sim returns null
 // for closeTradePnl — we derive locally from the canonical Boros core formula.
-import { formatSize, enrichAprValue } from '../../utils.js';
+import { formatSize, enrichAprValue, formatX18 } from '../../utils.js';
 import { tryBigInt } from './_helpers.js';
 
 // Inputs for local closeTradePnl. All optional — buildSimEcho populates only when
@@ -112,13 +112,14 @@ export function buildSimEcho(
       ? {
           size: formatSize(sim.matched.size),
           sizeUnit: 'YU',
-          cost: sim.matched.cost,
+          cost: formatX18(sim.matched.cost),
           costUnit: unit,
           rate: sim.matched.rate,
           ...enrichAprValue(sim.matched.rate),
         }
       : sim.matched,
-    marginRequired: sim.postState?.marginRequired,
+    // cost/marginRequired arrive as raw X18 bigint strings; format so they read as `unit`.
+    marginRequired: formatX18(sim.postState?.marginRequired),
     marginRequiredUnit: unit,
     liquidationApr: sim.postState?.liquidationApr,
     liquidationAprPercent: enrichAprValue(sim.postState?.liquidationApr)?.aprPercent,
