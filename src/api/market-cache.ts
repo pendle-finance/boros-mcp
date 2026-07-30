@@ -2,7 +2,8 @@ import { openApiGet } from '../api/open-api.js';
 import { fetchWithRetry } from '../lib/fetch-retry.js';
 import { dedupTtl } from '../lib/dedup.js';
 
-// `name` optional — backend omits imData.marketName on many markets; conditionally spread at callsites.
+// `name` = imData.name (full label, e.g. "Hyperliquid ETH 25 Sep 2026"). Present on all live markets;
+// still optional + conditionally spread at callsites so a shape change degrades instead of emitting undefined.
 export interface MarketInfo {
   name?: string;
   symbol: string;
@@ -34,7 +35,7 @@ export async function fetchMarketMap(): Promise<Map<number, MarketInfo>> {
 
     for (const m of list) {
       map.set(m.marketId, {
-        ...(m.imData?.marketName ? { name: m.imData.marketName } : {}),
+        ...(m.imData?.name ? { name: m.imData.name } : {}),
         symbol: m.metadata?.underlyingSymbol ?? '',
         tokenId: m.tokenId ?? 0,
       });

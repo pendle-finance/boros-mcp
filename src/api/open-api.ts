@@ -11,9 +11,9 @@ const PKG_VERSION: string = (() => {
 
 const CLIENT_HEADER = `boros-mcp/${PKG_VERSION}`;
 
-/** GET from open-api with query params. Returns parsed .data or full JSON. */
-export async function openApiGet(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<any> {
-  const url = new URL(`${OPEN_API_URL}${path}`);
+/** GET from open-api with query params. Returns parsed .data or full JSON. Pass `base` for apps/core routes. */
+export async function openApiGet(path: string, params?: Record<string, string | number | boolean | undefined>, base: string = OPEN_API_URL): Promise<any> {
+  const url = new URL(`${base}${path}`);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined) url.searchParams.set(k, String(v));

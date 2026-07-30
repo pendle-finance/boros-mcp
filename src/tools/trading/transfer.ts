@@ -8,6 +8,7 @@ import {
   jsonResult,
   enrichAmount,
   resolveAmount,
+  formatX18,
 } from '../../utils.js';
 import { BOROS_INTERNAL_DECIMALS } from '../../lib/format/amount.js';
 import { catchToErrorContent, errorContent, BorosErrorCode } from '../../agent/errors.js';
@@ -104,6 +105,19 @@ AMOUNT UNITS: prefer \`humanAmount\` (token units, e.g. 20 = 20 USDC) over \`amo
             }
           } catch { /* best-effort — fall through to backend sim semantics */ }
 
+          // collateralBalance / maintenanceMargin come back as raw X18 bigint strings under
+          // human-looking names on all four pre/post states — format them in place.
+          const fmtState = (s: any) =>
+            s
+              ? {
+                  ...s,
+                  collateralBalance: formatX18(s.collateralBalance),
+                  maintenanceMargin: formatX18(s.maintenanceMargin),
+                }
+              : s;
+          const fmtLeg = (l: any) =>
+            l ? { ...l, preUserState: fmtState(l.preUserState), postUserState: fmtState(l.postUserState) } : l;
+
           return jsonResult({
             ok: true,
             mode: 'simulate',
@@ -114,7 +128,12 @@ AMOUNT UNITS: prefer \`humanAmount\` (token units, e.g. 20 = 20 USDC) over \`amo
             direction,
             humanAmount: enrichAmount(transferAmount, BOROS_INTERNAL_DECIMALS, assetSymbol).humanAmount,
             symbol: assetSymbol,
-            simulation: sim,
+            simulation: {
+              ...sim,
+              crossAccState: fmtLeg(sim?.crossAccState),
+              isolatedAccState: fmtLeg(sim?.isolatedAccState),
+              balanceUnit: assetSymbol,
+            },
             nextTool: {
               tool: 'cash_transfer',
               params: {

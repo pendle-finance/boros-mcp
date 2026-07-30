@@ -23,7 +23,7 @@ export function registerMarketsIndicatorsTools(server: McpServer): void {
 Indicators: u = underlying perp funding rate (annualized; CEX or DEX venue per market); fp = quarterly futures premium (annualised decimal); fgi = fear & greed index (integer 0-100, exposed as fearGreedIndex + fearGreedClassification); ap = underlying asset spot USD price; udma = N-day moving average of u, computed for each value of udmaPeriods (1-365 days, up to 10 periods).
 Use this for fundamental analysis overlays. When udma is selected, the lookback window is automatically expanded to cover max(udmaPeriods) days so the rolling average has enough history.
 Do NOT use this for OHLCV candlestick data — use get_market_ohlcv instead.
-Pagination (max 50 points per call): to fetch older history, set endTimestamp = (oldest timestamp from prior page) - 1 and pass startTimestamp = endTimestamp - 50 * timeFrameSeconds. Timeframe seconds: 5m=300, 1h=3600, 1d=86400, 1w=604800.`,
+Pagination (max 200 points per call): to fetch older history, set endTimestamp = (oldest timestamp from prior page) - 1 and pass startTimestamp = endTimestamp - 200 * timeFrameSeconds. Timeframe seconds: 5m=300, 1h=3600, 1d=86400, 1w=604800.`,
       inputSchema: {
         marketId: marketIdField(),
         timeFrame: timeFrameField({ defaultValue: '1h' }),
@@ -37,13 +37,13 @@ Pagination (max 50 points per call): to fetch older history, set endTimestamp = 
           .optional()
           .describe('Moving-average windows in days for udma (e.g. [7, 30]). Each period must be 1-365; up to 10 periods allowed. Defaults to [7, 30] when udma is selected.'),
         limit: paginationLimitField({
-          max: 50,
+          max: 200,
           defaultValue: 20,
-          desc: 'Number of data points to return (default 20, max 50). Ignored when startTimestamp is provided. To page beyond 50, use endTimestamp; see tool description.',
+          desc: 'Number of data points to return (default 20, max 200). Ignored when startTimestamp is provided. To page beyond 200, use endTimestamp; see tool description.',
         }),
         startTimestamp: unixTimestampFieldOptional(
           'startTimestamp',
-          'Start timestamp (Unix seconds; not milliseconds). When paging older history, set startTimestamp = endTimestamp - 50 * timeFrameSeconds.',
+          'Start timestamp (Unix seconds; not milliseconds). When paging older history, set startTimestamp = endTimestamp - 200 * timeFrameSeconds.',
         ),
         endTimestamp: unixTimestampFieldOptional(
           'endTimestamp',

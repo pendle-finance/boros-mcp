@@ -4,10 +4,13 @@
 // checks the 4-byte selector; this adds semantic decoding+comparison against IntentExpectation.
 // Conservative: missing field = "don't check"; present field = "must match exactly".
 // Throws Error tagged __borosCode='INVALID_PARAMS' (prefix: "Calldata intent mismatch:").
-// AMM ops (swapWithAmm, *Liquidity*, ammCashTransfer) are selector-only for now — deep nested
-// slippage structs not yet wired into the trading-tools fast path.
+// The single-cash AMM liquidity legs are verified on `ammId` and ammCashTransfer on `marketId`
+// (NOTE: the *Liquidity* structs carry ammId only — they have no marketId field at all).
+// swapWithAmm and the *Dual* liquidity ops are still selector-only — no caller pins them yet.
 
 import { type Hex, decodeFunctionData, parseAbiItem } from 'viem';
+import { pathToFileURL } from 'node:url';
+import assert from 'node:assert/strict';
 import { ROUTER_SELECTORS } from './selectors.js';
 import { BorosErrorCode, tagBorosError } from '../agent/errors.js';
 
@@ -52,6 +55,36 @@ const ABI_PAY_TREASURY = parseAbiItem(
 
 const ABI_ENTER_EXIT_MARKETS = parseAbiItem(
   'function enterExitMarkets((bool cross, bool isEnter, uint24[] marketIds) req)',
+);
+
+// AMM legs of add_liquidity / remove_liquidity. Verbatim from the shipped Router ABI
+// (@pendle/boros-core IRouter.json: AMMCashTransferReq / Add|RemoveLiquiditySingleCashToAmmReq);
+// AMMId→uint24, Side enum→uint8. Selectors asserted in demo() below.
+const ABI_AMM_CASH_TRANSFER = parseAbiItem(
+  'function ammCashTransfer((uint24 marketId, uint256 cashIn, bool cashTransferAll) req)',
+);
+
+const ABI_ADD_LIQUIDITY_SINGLE_CASH = parseAbiItem(
+  'function addLiquiditySingleCashToAmm((' +
+    'bool cross,' +
+    'uint24 ammId,' +
+    'bool enterMarket,' +
+    'int256 netCashIn,' +
+    'uint256 minLpOut,' +
+    'uint8 desiredSwapSide,' +
+    'int128 desiredSwapRate' +
+  ') req)',
+);
+
+const ABI_REMOVE_LIQUIDITY_SINGLE_CASH = parseAbiItem(
+  'function removeLiquiditySingleCashFromAmm((' +
+    'bool cross,' +
+    'uint24 ammId,' +
+    'uint256 lpToRemove,' +
+    'int256 minCashOut,' +
+    'uint8 desiredSwapSide,' +
+    'int128 desiredSwapRate' +
+  ') req)',
 );
 
 export type SideEnum = 'long' | 'short' | 'LONG' | 'SHORT' | 0 | 1;
@@ -281,9 +314,66 @@ function verifyEnterExitMarkets(calldata: Hex, e: IntentExpectation): void {
   }
 }
 
+interface DecodedAmmCashTransferArgs {
+  args: readonly [{ marketId: number; cashIn: bigint; cashTransferAll: boolean }];
+}
+
+function verifyAmmCashTransfer(calldata: Hex, e: IntentExpectation): void {
+  const decoded = decodeFunctionData({ abi: [ABI_AMM_CASH_TRANSFER], data: calldata }) as unknown as DecodedAmmCashTransferArgs;
+  const req = decoded.args[0];
+  if (e.marketId !== undefined) eq('ammCashTransfer.marketId', req.marketId, e.marketId);
+  if (e.marketAcc !== undefined) {
+    eq('ammCashTransfer.marketId (vs marketAcc)', req.marketId, marketIdFromMarketAcc(e.marketAcc));
+  }
+  // cashIn deliberately unpinned: it is netCashIn + marketEntranceFee, i.e. backend arithmetic.
+}
+
+interface DecodedAddLiquiditySingleCashArgs {
+  args: readonly [{
+    cross: boolean;
+    ammId: number;
+    enterMarket: boolean;
+    netCashIn: bigint;
+    minLpOut: bigint;
+    desiredSwapSide: number;
+    desiredSwapRate: bigint;
+  }];
+}
+
+// ammId, not marketId — this struct has no marketId field. Pin `ammId` or nothing is checked.
+function verifyAddLiquiditySingleCashToAmm(calldata: Hex, e: IntentExpectation): void {
+  const decoded = decodeFunctionData({ abi: [ABI_ADD_LIQUIDITY_SINGLE_CASH], data: calldata }) as unknown as DecodedAddLiquiditySingleCashArgs;
+  const req = decoded.args[0];
+  if (e.cross !== undefined) eq('addLiquiditySingleCashToAmm.cross', req.cross, e.cross);
+  if (e.ammId !== undefined) eq('addLiquiditySingleCashToAmm.ammId', req.ammId, e.ammId);
+  if (e.amountExact !== undefined) eqBig('addLiquiditySingleCashToAmm.netCashIn', req.netCashIn, e.amountExact);
+  inRangeBig('addLiquiditySingleCashToAmm.netCashIn', req.netCashIn, e.amountMin, e.amountMax);
+}
+
+interface DecodedRemoveLiquiditySingleCashArgs {
+  args: readonly [{
+    cross: boolean;
+    ammId: number;
+    lpToRemove: bigint;
+    minCashOut: bigint;
+    desiredSwapSide: number;
+    desiredSwapRate: bigint;
+  }];
+}
+
+// ammId, not marketId — see verifyAddLiquiditySingleCashToAmm.
+function verifyRemoveLiquiditySingleCashFromAmm(calldata: Hex, e: IntentExpectation): void {
+  const decoded = decodeFunctionData({ abi: [ABI_REMOVE_LIQUIDITY_SINGLE_CASH], data: calldata }) as unknown as DecodedRemoveLiquiditySingleCashArgs;
+  const req = decoded.args[0];
+  if (e.cross !== undefined) eq('removeLiquiditySingleCashFromAmm.cross', req.cross, e.cross);
+  if (e.ammId !== undefined) eq('removeLiquiditySingleCashFromAmm.ammId', req.ammId, e.ammId);
+  if (e.amountExact !== undefined) eqBig('removeLiquiditySingleCashFromAmm.lpToRemove', req.lpToRemove, e.amountExact);
+  inRangeBig('removeLiquiditySingleCashFromAmm.lpToRemove', req.lpToRemove, e.amountMin, e.amountMax);
+}
+
 /**
  * Verify a calldata against caller's expected intent. Throws (INVALID_PARAMS) on mismatch.
- * No-op for AMM ops (selector-only via assertCalldatasAllowed upstream).
+ * Still a no-op for swapWithAmm / *Dual* liquidity ops (selector-only via assertCalldatasAllowed).
  */
 export function verifyCalldataIntent(calldata: Hex, expect: IntentExpectation): void {
   if (!calldata || typeof calldata !== 'string' || !calldata.startsWith('0x') || calldata.length < 10) {
@@ -301,15 +391,69 @@ export function verifyCalldataIntent(calldata: Hex, expect: IntentExpectation): 
     case ROUTER_SELECTORS.cashTransfer: return verifyCashTransfer(calldata, expect);
     case ROUTER_SELECTORS.payTreasury: return verifyPayTreasury(calldata, expect);
     case ROUTER_SELECTORS.enterExitMarkets: return verifyEnterExitMarkets(calldata, expect);
-    // Deferred — selector-only via assertCalldatasAllowed upstream.
-    case ROUTER_SELECTORS.ammCashTransfer:
+    case ROUTER_SELECTORS.ammCashTransfer: return verifyAmmCashTransfer(calldata, expect);
+    case ROUTER_SELECTORS.addLiquiditySingleCashToAmm: return verifyAddLiquiditySingleCashToAmm(calldata, expect);
+    case ROUTER_SELECTORS.removeLiquiditySingleCashFromAmm: return verifyRemoveLiquiditySingleCashFromAmm(calldata, expect);
+    // Deferred — selector-only via assertCalldatasAllowed upstream. No caller pins these yet.
     case ROUTER_SELECTORS.swapWithAmm:
     case ROUTER_SELECTORS.addLiquidityDualToAmm:
-    case ROUTER_SELECTORS.addLiquiditySingleCashToAmm:
     case ROUTER_SELECTORS.removeLiquidityDualFromAmm:
-    case ROUTER_SELECTORS.removeLiquiditySingleCashFromAmm:
       return;
     default:
       mismatch(`no intent verifier registered for selector ${sel}`);
   }
 }
+
+// ponytail: this repo has no test framework. One runnable self-check instead:
+//   `yarn build && node dist/chain/calldata-verify.js`  (exit 0 = pass, throws = fail)
+// Fixtures are real prod calldata captured from
+// POST /v1/calldata-builder/agent/{add,remove}-liquidity-to-amm
+// (marketId 102 / ammId 1020, netCashIn 10e18, lpToRemove 1e18, min* = "1").
+const FIXTURES = {
+  ammCashTransferAdd:
+    '0x5065e6f900000000000000000000000000000000000000000000000000000000000000660000000000000000000000000000000000000000000000008ac7230489e800000000000000000000000000000000000000000000000000000000000000000000' as Hex,
+  addLiquiditySingleCashToAmm:
+    '0x80fc6ec7000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003fc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008ac7230489e80000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000192472bb6ce3922' as Hex,
+  removeLiquiditySingleCashFromAmm:
+    '0x5092d247000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003fc0000000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000002f01b35944391a' as Hex,
+} as const;
+
+export function demo(): void {
+  // Selectors must match what the shipped Router ABI hashes to.
+  assert.equal(FIXTURES.ammCashTransferAdd.slice(0, 10), ROUTER_SELECTORS.ammCashTransfer);
+  assert.equal(FIXTURES.addLiquiditySingleCashToAmm.slice(0, 10), ROUTER_SELECTORS.addLiquiditySingleCashToAmm);
+  assert.equal(FIXTURES.removeLiquiditySingleCashFromAmm.slice(0, 10), ROUTER_SELECTORS.removeLiquiditySingleCashFromAmm);
+
+  // Pinned field round-trips: the ABIs decode real calldata to the values the builder was asked for.
+  verifyCalldataIntent(FIXTURES.ammCashTransferAdd, {
+    selector: ROUTER_SELECTORS.ammCashTransfer,
+    marketId: 102,
+  });
+  verifyCalldataIntent(FIXTURES.addLiquiditySingleCashToAmm, {
+    selector: ROUTER_SELECTORS.addLiquiditySingleCashToAmm,
+    ammId: 1020,
+    amountExact: 10_000_000_000_000_000_000n,
+  });
+  verifyCalldataIntent(FIXTURES.removeLiquiditySingleCashFromAmm, {
+    selector: ROUTER_SELECTORS.removeLiquiditySingleCashFromAmm,
+    ammId: 1020,
+    amountExact: 1_000_000_000_000_000_000n,
+  });
+
+  // ...and a wrong pin is actually caught (the A23 bug was that nothing was ever compared).
+  assert.throws(
+    () => verifyCalldataIntent(FIXTURES.ammCashTransferAdd, { selector: ROUTER_SELECTORS.ammCashTransfer, marketId: 103 }),
+    /Calldata intent mismatch: ammCashTransfer\.marketId/,
+  );
+  assert.throws(
+    () => verifyCalldataIntent(FIXTURES.addLiquiditySingleCashToAmm, { selector: ROUTER_SELECTORS.addLiquiditySingleCashToAmm, ammId: 1030 }),
+    /Calldata intent mismatch: addLiquiditySingleCashToAmm\.ammId/,
+  );
+  assert.throws(
+    () => verifyCalldataIntent(FIXTURES.removeLiquiditySingleCashFromAmm, { selector: ROUTER_SELECTORS.removeLiquiditySingleCashFromAmm, ammId: 1030 }),
+    /Calldata intent mismatch: removeLiquiditySingleCashFromAmm\.ammId/,
+  );
+  console.log('calldata-verify demo: OK');
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) demo();

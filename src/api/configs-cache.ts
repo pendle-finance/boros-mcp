@@ -1,6 +1,7 @@
 import type { Address } from 'viem';
 import { openApiGet } from '../api/open-api.js';
 import { fetchWithRetry } from '../lib/fetch-retry.js';
+import { CORE_API_URL } from '../config.js';
 
 // 15-min per-root cache for /v1/configs. Global rarely changes; personalCoolDown override may
 // extend mins-hours when account flagged by withdrawal-policy enforcement.
@@ -24,7 +25,7 @@ export async function fetchGlobalConfig(root: Address): Promise<GlobalConfigShap
   if (hit && hit.expiresAt > now) return hit.value;
   try {
     const res = (await fetchWithRetry(() =>
-      openApiGet('/v1/configs', { root }),
+      openApiGet('/v1/configs', { root }, CORE_API_URL),
     )) as GlobalConfigShape;
     globalConfigCache.set(key, { value: res ?? {}, expiresAt: now + GLOBAL_CONFIG_TTL_MS });
     return res ?? {};

@@ -39,6 +39,8 @@ export function registerAccountPositionsTools(server: McpServer) {
     'cumulativePnl',
     'fixedAprPercent',
   ] as const;
+  // Exactly the wire keys of ActivePositionWithPnlResponse (+ locally derived ones). Do not add
+  // margin/positionValue/liquidationApr here — /v1/accounts/active-positions does not return them.
   const POSITIONS_OPTIONAL_FIELDS = [
     'marketAcc',
     'marketAccDecoded',
@@ -46,16 +48,12 @@ export function registerAccountPositionsTools(server: McpServer) {
     'unrealisedPnl',
     'settlementPnl',
     'isMatured',
-    'positionValue',
-    'liquidationApr',
-    'initialMargin',
-    'maintMargin',
-    'tokenId',
+    'isCross',
   ] as const;
 
   const POSITIONS_FILTER_FIELDS = [
     'marketId', 'marketName', 'marketSymbol', 'sideLabel',
-    'signedSize', 'cumulativePnl', 'unrealisedPnl', 'fixedApr', 'tokenId',
+    'signedSize', 'cumulativePnl', 'unrealisedPnl', 'fixedApr',
   ] as const;
   const POSITIONS_SORT_FIELDS = [
     'marketId', 'signedSize', 'cumulativePnl', 'unrealisedPnl', 'fixedApr',
@@ -65,7 +63,7 @@ export function registerAccountPositionsTools(server: McpServer) {
     'get_positions',
     {
       annotations: { readOnlyHint: true },
-      description: 'List open positions (non-zero size) for an account from the indexer. Per row: market, direction (long/short), signed size in YU, entry fixedApr, all-time cumulative trade PnL (in the marketAcc collateral token), maturity flag, decoded marketAcc. Does NOT return unrealised PnL, mark/liquidation APR, or margin by default — use get_pnl_by_market for live PnL and get_collateral for margin/liquidation APR. cumulativePnl is shipped formatted via the 18-dec internal scaling.',
+      description: 'List open positions (non-zero size) for an account from the indexer. Per row: market, direction (long/short), signed size in YU, entry fixedApr, all-time cumulative trade PnL (in the marketAcc collateral token), maturity flag, decoded marketAcc. unrealisedPnl / settlementPnl / isCross are available via `include`. Margin, positionValue and liquidation APR are NOT on this endpoint at all (no `include` value returns them) — use get_collateral for margin/liquidationApr/positionValue. cumulativePnl is shipped formatted via the 18-dec internal scaling.',
       inputSchema: {
         userAddress: userAddressField(),
         accountId: accountIdField('Default 0 for main account.'),
@@ -97,7 +95,9 @@ export function registerAccountPositionsTools(server: McpServer) {
 
         const fullRows = positions.map((p: any) => {
           const mkt = marketMap.get(p.marketId);
-          const { side, signedSize, cumulativePnl, ...rest } = p;
+          // All three PnL fields are 18-dec on the wire — format every one, or an optional
+          // include leaks a raw bigint next to _context.amounts saying "already normalized".
+          const { side, signedSize, cumulativePnl, unrealisedPnl, settlementPnl, ...rest } = p;
           return {
             ...rest,
             ...(p.marketAcc ? { marketAccDecoded: decodeMarketAcc(p.marketAcc, assetMap) } : {}),
@@ -107,6 +107,8 @@ export function registerAccountPositionsTools(server: McpServer) {
             ...(p.fixedApr !== undefined ? { fixedAprPercent: enrichAprValue(p.fixedApr)?.aprPercent } : {}),
             ...(signedSize !== undefined ? { signedSize: formatSize(signedSize) } : {}),
             ...(cumulativePnl !== undefined ? { cumulativePnl: formatX18(cumulativePnl) } : {}),
+            ...(unrealisedPnl !== undefined ? { unrealisedPnl: formatX18(unrealisedPnl) } : {}),
+            ...(settlementPnl !== undefined ? { settlementPnl: formatX18(settlementPnl) } : {}),
           };
         });
         const totalBeforeFilter = fullRows.length;
@@ -149,14 +151,14 @@ export function registerAccountPositionsTools(server: McpServer) {
     'get_collateral',
     {
       annotations: { readOnlyHint: true },
-      description: 'Get per-marketAcc margin/equity (totalCash, netBalance, initialMargin, availableInitialMargin, availableMaintMargin, per-position margin/liquidationApr/orders). When marketAccs is omitted, calls GET /v1/accounts/market-acc-infos-by-root to discover EVERY funded sub-account under the root (cross + isolated, including dust accounts with cash but no positions) and filters by accountId locally. When marketAccs is provided, POSTs /v1/accounts/market-acc-infos for the exact list. Boros supports multi-asset collateral: each account entry carries its own marketAccDecoded.tokenSymbol (USDT, WETH, etc.) but all numeric *Formatted values are 18-dec normalized internal cash units (do NOT re-scale by token on-chain decimals). NOT a gas-balance view — for that use get_gas_info.',
+      description: 'Get per-marketAcc margin/equity (totalCash, netBalance, initialMargin, availableInitialMargin, availableMaintMargin, per-position margin/liquidationApr/orders). ACCOUNT ID 0 ONLY when marketAccs is omitted: the discovery call GET /v1/accounts/market-acc-infos-by-root hardcodes accountId 0 server-side, so it can only ever return accountId-0 marketAccs (cross + isolated, including dust accounts with cash but no positions). For ANY non-zero accountId you MUST pass marketAccs explicitly — otherwise this tool reports zero collateral even for a fully funded sub-account, and a "no funded marketAcc" result is NOT evidence that the sub-account is empty. When marketAccs is provided, POSTs /v1/accounts/market-acc-infos for the exact list (honours every accountId). Boros supports multi-asset collateral: each account entry carries its own marketAccDecoded.tokenSymbol (USDT, WETH, etc.) but all numeric *Formatted values are 18-dec normalized internal cash units (do NOT re-scale by token on-chain decimals). NOT a gas-balance view — for that use get_gas_info.',
       inputSchema: {
         userAddress: userAddressField(),
         accountId: accountIdField('Default 0 for main account.'),
         marketAccs: z
           .array(z.string())
           .optional()
-          .describe('Specific marketAcc addresses to query. If omitted, derives from active positions + cross account.'),
+          .describe('Specific marketAcc addresses to query (POST /v1/accounts/market-acc-infos; honours any accountId). If omitted, marketAccs are discovered via GET /v1/accounts/market-acc-infos-by-root, which is accountId 0 ONLY — required for any non-zero accountId. Source them from get_positions(accountId) `marketAcc` (include:["marketAcc"]).'),
         filter: z
           .array(makeFilterSchema(COLLATERAL_FILTER_FIELDS))
           .optional()
@@ -183,7 +185,7 @@ export function registerAccountPositionsTools(server: McpServer) {
 
           if (filteredByAccount.length === 0) {
             return jsonResult({
-              message: 'No funded marketAcc found under this (root, accountId). Pass marketAccs explicitly to query specific accounts.',
+              message: `No accountId-${wantAccountId} marketAcc in the discovery response. Discovery (GET market-acc-infos-by-root) is accountId 0 ONLY — server-hardcoded — so this does NOT prove the account is unfunded${wantAccountId === 0 ? '' : '; for accountId ' + wantAccountId + ' it proves nothing at all'}. Pass marketAccs explicitly to query specific accounts.`,
               accounts: [],
               ...(res.syncStatus ? { syncStatus: res.syncStatus } : {}),
             });
@@ -226,12 +228,17 @@ export function registerAccountPositionsTools(server: McpServer) {
                       ...(Array.isArray(orders)
                         ? {
                             orders: orders.map((o: any) => {
-                              const { size: osize, rate: orate, initialMarginWithLeverage: oimwl, ...orest } = o;
+                              const {
+                                size: osize, rate: orate,
+                                initialMargin: oim, initialMarginWithLeverage: oimwl,
+                                ...orest
+                              } = o;
                               return {
                                 ...orest,
                                 ...(o.maker ? { makerDecoded: decodeMarketAcc(o.maker, assetMap) } : {}),
                                 ...(o.size !== undefined ? { sizeFormatted: formatSize(o.size) } : {}),
                                 ...(o.rate !== undefined ? { ratePercent: formatApr18(o.rate)?.aprPercent } : {}),
+                                ...(o.initialMargin !== undefined ? { initialMarginFormatted: formatX18(o.initialMargin) } : {}),
                                 ...(o.initialMarginWithLeverage !== undefined ? { initialMarginWithLeverageFormatted: formatX18(o.initialMarginWithLeverage) } : {}),
                               };
                             }),
@@ -265,6 +272,7 @@ export function registerAccountPositionsTools(server: McpServer) {
           _context: {
             apr: APR_NOTE,
             balances: AMOUNTS_IN_COLLATERAL_NOTE,
+            accountId: 'Auto-discovery (marketAccs omitted) covers accountId 0 ONLY — market-acc-infos-by-root hardcodes accountId 0 server-side. A non-zero accountId returns nothing here unless marketAccs is passed explicitly; do NOT read that as "the sub-account has no collateral".',
             tokenSymbol: 'marketAccDecoded.tokenSymbol identifies the underlying token but values are already 18-dec normalized.',
             gasBudget: 'For gas budget, call get_gas_info — collateral and gas are separate.',
           },

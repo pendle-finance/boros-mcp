@@ -17,7 +17,18 @@ export function registerEventsOnChainTools(server: McpServer): void {
       annotations: { readOnlyHint: true },
       description: 'Query the backend\'s indexed catalogue of decoded Boros contract events (Router/MarketHub/Market/AMM/MarketFactory) with cursor-based pagination, sorted newest-first by (blockNumber, logIndex). Use this for protocol-wide audits ("all MarketCreated events", "all AgentApproved on the Router", "raw Liquidate logs"). Do NOT use for user-centric questions: trade fills on a known account → get_transaction_history; deposits/withdrawals/cash transfers on a known account → get_transfer_logs; liquidations with rate enrichment → get_liquidation_events; account snapshot → get_portfolio_summary. `sourceAddress` filters by *contract* address (Router/MarketHub/etc), NOT user wallet.',
       inputSchema: {
-        eventName: z.string().optional().describe('Filter by event name (e.g. "BulkOrdersExecuted", "Liquidate", "MarketCreated", "AgentApproved", "EnterMarket"). Closed enum on the backend (see OnChainEventName); typos silently return 0 rows.'),
+        eventName: z.string().optional().describe(
+          'Filter by exact event name (case-sensitive). NOT validated server-side — the backend takes a free-form string, so a typo or an invented name returns HTTP 200 with 0 rows rather than an error. There is no discovery endpoint; pick from this list (all 64 indexed names, grouped). '
+          + 'Orders/fills: LimitOrderPlaced, LimitOrderFilled, LimitOrderPartiallyFilled, LimitOrderCancelled, LimitOrderForcedCancelled, OobOrdersPurged, MarketOrdersFilled, SingleOrderExecuted, BulkOrdersExecuted, ConditionalOrderExecuted, OtcSwap, OTCTradeExecuted. '
+          + 'Funding/settlement: FIndexUpdated, PaymentFromSettlement (this is the settlement payment event — there is NO event called "Settlement", despite the backend docs citing it), FTagUpdatedOnPurge. '
+          + 'Risk: Liquidate, ForceDeleverage. '
+          + 'Account/cash: EnterMarket, ExitMarket, CashTransfer, VaultDeposit, VaultWithdrawalRequested, VaultWithdrawalCanceled, VaultWithdrawalFinalized, CashInstantWithdraw, CashSwapExecuted, PayTreasury, CollectFee. '
+          + 'Agent/Router: AgentApproved, AgentRevoked, NewAccManagerSet. '
+          + 'AMM: AMMCreated, SwapWithAmm, AddLiquidityDualToAmm, AddLiquiditySingleCashToAmm, RemoveLiquidityDualFromAmm, RemoveLiquiditySingleCashFromAmm, Mint, Burn, BOROS20Transfer. '
+          + 'Listing: MarketCreated, MarketAdded, TokenAdded. '
+          + 'Config/governance: FeeRatesUpdated, MarginConfigUpdated, RateBoundConfigUpdated, LimitOrderConfigUpdated, LiquidationSettingsUpdated, OICapUpdated, MaxOpenOrdersUpdated, OracleAddressesUpdated, ImpliedRateObservationWindowUpdated, StatusUpdated, MarketEntranceFeesUpdated, GlobalCooldownSet, PersonalCooldownSet, CritHRUpdated, RiskyThresHRUpdated, StrictHealthCheckUpdated, MinCashCrossAccountsUpdated, MinCashIsolatedAccountsUpdated, PersonalMarginConfigUpdated, PersonalDiscRatesUpdated, PersonalExemptCLOCheckUpdated. '
+          + 'Note the irregular casing: OobOrdersPurged, AMMCreated, BOROS20Transfer, OTCTradeExecuted, OtcSwap, SwapWithAmm, CritHRUpdated.',
+        ),
         sourceAddress: addressFieldOptional('sourceAddress', 'Filter by source CONTRACT address (e.g. Router 0x8080808080daB95eFED788a9214e400ba552DEf6) — not a user wallet'),
         fromBlockNumber: z.number().int().min(0).optional().describe('Start block (inclusive)'),
         toBlockNumber: z.number().int().min(0).optional().describe('End block (inclusive)'),

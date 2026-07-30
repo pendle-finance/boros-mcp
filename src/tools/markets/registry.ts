@@ -29,7 +29,7 @@ export function registerMarketsRegistryTools(server: McpServer): void {
 
 LIST MODE (no \`marketIds\`): list UI-whitelisted markets with optional filtering and sorting. Use to discover markets, compare volume/APR/OI, find by name/symbol. By default matures are hidden — set \`includeMatured:true\` to include. The cross-margin sentinel marketId 16777215 is never returned. Pass \`include:["all"]\` (or legacy \`fullDetail:true\`) to surface raw imData/config/metadata/extConfig/data per market.
 
-ID MODE (\`marketIds\` set): bulk fetch by ID, preserves request order, dedups, INCLUDES matured markets. Returns missing IDs in the \`missing\` array (cause not distinguished — typo vs hidden). Maximum 50 IDs per request. Doubles as the batched top-of-book endpoint: each market carries \`bestBid\`, \`bestAsk\`, \`midApr\`, \`markApr\`, \`lastTradedApr\` when included. Prefer over N parallel get_orderbook calls. Markets flagged \`metadata.isWhitelisted = false\` are never returned.
+ID MODE (\`marketIds\` set): bulk fetch by ID, preserves request order, dedups, INCLUDES matured markets. Returns missing IDs in the \`missing\` array (cause not distinguished — typo vs hidden). Maximum 100 IDs per request. Doubles as the batched top-of-book endpoint: each market carries \`bestBid\`, \`bestAsk\`, \`midApr\`, \`markApr\`, \`lastTradedApr\` when included. Prefer over N parallel get_orderbook calls. Markets flagged \`metadata.isWhitelisted = false\` are never returned.
 
 When presenting results, ALWAYS include marketId alongside name/symbol — it's required for every follow-up tool. status values (on-chain MarketStatus, independent of maturity): 2 = "GOOD" (normal), 1 = "CLO" / "CLOSE_ONLY" (position-reducing orders only), 0 = "PAUSED" (no trading at all — fully halted).
 
@@ -39,9 +39,9 @@ Sortable fields: marketId, volume24h, notionalOI, markApr, midApr, floatingApr, 
         marketIds: z
           .array(marketIdField())
           .min(1)
-          .max(50)
+          .max(100)
           .optional()
-          .describe('When provided, switches to ID mode (bulk fetch by ID, preserves order, dedups, includes matured). Max 50. Omit for LIST mode.'),
+          .describe('When provided, switches to ID mode (bulk fetch by ID, preserves order, dedups, includes matured). Max 100. Omit for LIST mode.'),
         filter: z.array(FilterConditionSchema).optional().describe('Filter conditions (LIST mode only).'),
         sort: SortSchema.optional().describe('Sort criteria (LIST mode only).'),
         limit: paginationLimitField({ max: 50, defaultValue: 20, desc: 'Max results to return (LIST mode only; default 20, max 50).' }),

@@ -15,63 +15,52 @@ import {
 import { fetchWithRetry } from '../../lib/fetch-retry.js';
 import { dedupTtl } from '../../lib/dedup.js';
 import { withAuth } from '../_with-auth.js';
-import { marketIdField } from '../_schemas.js';
+import { marketIdField, marginModeField } from '../_schemas.js';
 
 export function registerMarketsTools(server: McpServer) {
   server.registerTool(
     'enter_exit_markets',
     {
       annotations: { destructiveHint: true },
-      description: 'Enter or exit markets on the cross account. Entering a market allows trading on it under cross margin. Exiting requires zero position size AND zero open limit orders. NOTE: entering a market draws a per-market entry fee (~$10 of cross collateral, on top of the off-chain gas budget) — if your cross account is below this floor the call reverts with "Top up at least ~$10 to trade"; deposit more cross collateral first. NOTE: matured markets cannot be exited today — the calldata-builder rejects them with "Market X is expired", so they remain permanently in get_entered_markets until that path is opened. The pre-flight here detects matured markets and returns a clear error before paying gas.',
+      description: 'Enter or exit markets. Entering a market allows trading on it under the chosen margin mode. Exiting requires zero position size AND zero open limit orders in that same bucket. Markets flagged `isIsolatedOnly:true` by get_markets REQUIRE marginMode:"isolated" — a cross entry on one of those still succeeds and still charges the entry fee, but the account can never place an order there. Isolated enter/exit targets exactly ONE marketId per call (backend rule); call again per market. NOTE: entering a market draws a one-time per-market entrance fee in collateral, on top of the off-chain gas budget. It is small but NOT uniform across collaterals — measured ~$0.05 on WBTC and WETH markets and $0.10 on USD₮0 — so read the real number from a simulation `feeBreakdown.marketEntranceFee` rather than assuming one. SEPARATELY, a thinly funded account is rejected by the backend simulation with "Top up at least ~$10 to trade"; that ~$10 is a minimum-to-trade floor, NOT the entrance fee. If you hit it, deposit more collateral.',
       inputSchema: {
         action: z.enum(['enter', 'exit']).describe('Whether to enter or exit the markets'),
-        marketIds: z.array(marketIdField()).min(1, 'marketIds must contain at least one market ID').describe('Array of market IDs to enter or exit (at least one required)'),
+        marginMode: marginModeField('MUST be "isolated" for isolated-only markets, and then marketIds must hold exactly one id.'),
+        marketIds: z.array(marketIdField()).min(1, 'marketIds must contain at least one market ID').max(100, 'marketIds accepts at most 100 market IDs').describe('Array of market IDs to enter or exit (1..100; exactly 1 when marginMode is "isolated")'),
       },
     },
-    withAuth(async ({ action, marketIds }, { rootAddress }) => {
+    withAuth(async ({ action, marginMode, marketIds }, { rootAddress }) => {
       try {
         const accountId = DEFAULT_ACCOUNT_ID;
 
         const isEnter = action === 'enter';
+        const isCross = marginMode !== 'isolated';
+
+        // Backend rule: "Isolated enter/exit must target exactly one marketId" (400). Check first so
+        // we never pay gas — and never burn a per-market entry fee — on a request that cannot build.
+        if (!isCross && marketIds.length !== 1) {
+          return errorContent(
+            BorosErrorCode.INVALID_PARAMS,
+            `marginMode:'isolated' requires exactly one marketId (got ${marketIds.length}). Isolated buckets are per-market — call enter_exit_markets once per market.`,
+          );
+        }
 
         // Exit pre-check: contract requires signedSize==0 AND nOrders==0 (MarketHubEntry.exitMarket)
         // — fetch both positions + resting orders per marketId to avoid MMMarketExitDenied revert.
-        // Also fetch market metadata so matured markets can be flagged client-side (the
-        // calldata-builder rejects them with "Market X is expired" — we want a clear pre-flight
-        // error instead of a blind round-trip + paid gas).
+        // Matched on `isCross` too: cross and isolated are separate buckets with separate nOrders
+        // counters, so a cross position must not block an isolated exit of the same marketId.
         if (!isEnter) {
-          const [positions, marketsInfo] = await Promise.all([
-            fetchWithRetry(() =>
-              openApiGet('/v1/accounts/active-positions', {
-                root: rootAddress,
-                accountId,
-              }),
-            ),
-            Promise.all(
-              marketIds.map(async (mid) => {
-                try {
-                  const m = await fetchWithRetry(() =>
-                    openApiGet(`/v1/markets/${mid}`),
-                  );
-                  return { mid, isMatured: Boolean(m?.isMatured ?? (typeof m?.maturity === 'number' && m.maturity * 1000 <= Date.now())) };
-                } catch {
-                  return { mid, isMatured: false };
-                }
-              }),
-            ),
-          ]);
-          const matured = marketsInfo.filter((m) => m.isMatured).map((m) => m.mid);
-          if (matured.length > 0) {
-            return errorContent(
-              BorosErrorCode.INVALID_PARAMS,
-              `Cannot exit matured market(s): ${matured.join(', ')}. The Boros calldata-builder rejects exit on matured markets ("Market X is expired"). Matured markets stay permanently in get_entered_markets — there is no current workaround. To exit live markets in this batch, omit the matured ids from marketIds.`,
-            );
-          }
+          const positions = await fetchWithRetry(() =>
+            openApiGet('/v1/accounts/active-positions', {
+              root: rootAddress,
+              accountId,
+            }),
+          );
           const posArray = Array.isArray(positions) ? positions : ((positions as any).results ?? []);
           const blockers: { marketId: number; signedSize?: string; openOrderCount?: number }[] = [];
           const blockerByMarket = new Map<number, { signedSize?: string; openOrderCount?: number }>();
           for (const p of posArray) {
-            if (p.marketId !== undefined && marketIds.includes(p.marketId)) {
+            if (p.marketId !== undefined && marketIds.includes(p.marketId) && p.isCross === isCross) {
               let nonZero = true;
               try { nonZero = BigInt(p.signedSize ?? '0') !== 0n; } catch { /* keep */ }
               if (nonZero) {
@@ -93,12 +82,14 @@ export function registerMarketsTools(server: McpServer) {
                     accountId,
                     marketId: mid,
                     isActive: true,
-                    limit: 1,
+                    limit: 50,
                   }),
                 );
-                const total = typeof data?.total === 'number'
-                  ? data.total
-                  : Array.isArray(data?.results) ? data.results.length : 0;
+                // LimitOrdersV2Response is {results, resumeToken, syncStatus} — no `total`. The
+                // endpoint has no isCross filter, so page a chunk and match the bucket locally.
+                const total = (Array.isArray(data?.results) ? data.results : []).filter(
+                  (o: any) => o.isCross === isCross,
+                ).length;
                 if (total > 0) {
                   blockerByMarket.set(mid, {
                     ...(blockerByMarket.get(mid) ?? {}),
@@ -116,7 +107,7 @@ export function registerMarketsTools(server: McpServer) {
           if (blockers.length > 0) {
             return errorContent(
               BorosErrorCode.INVALID_PARAMS,
-              `Cannot exit market(s) — contract requires signedSize==0 AND nOrders==0 (MMMarketExitDenied). ` +
+              `Cannot exit ${marginMode} market(s) — contract requires signedSize==0 AND nOrders==0 (MMMarketExitDenied). ` +
                 `Blocked: ${blockers
                   .map((b) => {
                     const parts: string[] = [`marketId=${b.marketId}`];
@@ -133,16 +124,14 @@ export function registerMarketsTools(server: McpServer) {
           ? '/v1/calldata-builder/agent/enter-markets'
           : '/v1/calldata-builder/agent/exit-markets';
 
-        // Pin isCross:true — this MCP surface is cross-only; explicit prevents future default drift.
         const calldataRes = await fetchWithRetry(() =>
-          openApiPost(endpoint, { accountId, isCross: true, marketIds }),
+          openApiPost(endpoint, { accountId, isCross, marketIds }),
         );
         const calldatas = extractCalldatas(calldataRes);
 
-        // enterExitMarkets always cross-account (IRouterEventsAndTypes).
         const enterExitIntent: IntentExpectation = {
           selector: ROUTER_SELECTORS.enterExitMarkets,
-          cross: true,
+          cross: isCross,
           isEnter,
           marketIdsSet: marketIds,
         };
@@ -194,6 +183,7 @@ export function registerMarketsTools(server: McpServer) {
         return jsonResult({
           ok: true,
           action: `${action}_markets`,
+          marginMode,
           ...(txHash ? { txHash } : {}),
           markets: marketNames,
           count: marketIds.length,

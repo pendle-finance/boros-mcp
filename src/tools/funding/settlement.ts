@@ -24,7 +24,8 @@ export function registerFundingSettlementTools(server: McpServer): void {
       annotations: { readOnlyHint: true },
       description: 'Get periodic funding-rate settlement aggregates (market-wide), one row per market per settlement bucket, sorted newest-first. Bucket cadence is per market (commonly 1h, 4h, or 8h — matches the upstream perp funding interval; resolve via the `periodTimestamp` deltas in the response). This is funding settlement, NOT market-maturity expiry settlement. Use get_pnl_history for a single account\'s funding paid/received; use get_market_indicators for upstream perp funding source rates per market; use get_pnl_by_market for live unrealized funding. Use this only for market-wide settlement history.',
       inputSchema: {
-        marketIds: z.array(marketIdField()).optional().describe('Markets to include. Omit to include all.'),
+        // Backend: ArrayMinSize(1) + ArrayMaxSize(100) — [] and >100 both 400.
+        marketIds: z.array(marketIdField()).min(1).max(100).optional().describe('Markets to include: 1-100 ids. Never pass an empty array (backend 400s) — OMIT the field to cover all whitelisted markets. There are ~183 markets, so an explicit "all markets" list exceeds the 100 cap; omit instead.'),
         fromTimestamp: unixTimestampField('fromTimestamp', 'Start of range (Unix seconds; not milliseconds).'),
         toTimestamp: unixTimestampField('toTimestamp', 'End of range (Unix seconds; not milliseconds).'),
         filter: z
