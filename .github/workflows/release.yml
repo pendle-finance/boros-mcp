@@ -1,0 +1,108 @@
+name: Release production package
+
+# Re-enabled 2026-08-29, rebuilt on the pattern pendle-sdk-boros uses. The version
+# commit and tag now go through the GitHub REST API, so GitHub signs them and they
+# read Verified. That matters here: boros-mcp is covered by the org `Signed Commits`
+# ruleset as of 2026-08-29, and an unsigned push to `main` is rejected. The old
+# workflow pushed with plain git, which is why its 9 `github-actions[bot]` version
+# commits are unverified and why the repo had to be excluded from that ruleset.
+#
+# Three differences from the version disabled in #23, each load-bearing:
+#
+#   commitMode: github-api   the whole point — REST API commits are GPG-signed by
+#                            GitHub. Remove this line and every release is rejected
+#                            by the ruleset.
+#   an App token             GITHUB_TOKEN cannot open a pull request in this org.
+#                            `can_approve_pull_request_reviews = false` governs CREATE
+#                            as well as approve, and the failure reads
+#                            "GitHub Actions is not permitted to create or approve
+#                            pull requests." Re-enabling that org setting is not the
+#                            fix — it would let a bot satisfy the 1-approval rule on
+#                            main, which boros-mcp now has as a tier1 repo.
+#   changeset publish        `yarn release` is `yarn npm publish`, which PUTs
+#                            unconditionally and 403s on every changeset-less merge.
+#                            `changeset publish` skips versions already on the registry.
+#
+# Secrets: see the note on the `Mint release-bot token` step. This workflow cannot
+# succeed until all three exist on this repo.
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    # The repo is public, so a fork's push to its own `main` would otherwise start a run.
+    if: github.repository == 'pendle-finance/boros-mcp'
+    environment: npm-registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # Only actions/checkout uses this token, and only to read. The release commit,
+      # the tag and the release PR all go through the App token minted below.
+      contents: read
+    env:
+      BOROS_MCP_NPM_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 20
+          cache: yarn
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: yarn install --immutable
+
+      - name: Prepare pull request message
+        # `changeset status` exits 1 on "packages have been changed but no changesets
+        # were found". That is a normal state on main right after a changeset-less
+        # merge, such as a CI-only PR, and under `bash -e` a bare call kills the job.
+        # The single-line `$( ... )` form this replaces hid the exit code by accident,
+        # because only `echo`'s status was ever checked.
+        #
+        # `.releases` is EMPTY on a merge carrying no changeset, so `.releases[0]
+        # .newVersion` yields the string "null" and the log reads `Releasing vnull`.
+        # `// empty` leaves NEW_VERSION unset instead. Nothing downstream breaks either
+        # way: with no changeset the action takes the publish path and never opens a PR,
+        # so the title is never used.
+        run: |
+          yarn changeset status --output=release.json || true
+          if [ -f release.json ]; then
+            echo "NEW_VERSION=$(jq -r '.releases[0].newVersion // empty' release.json)" >> $GITHUB_ENV
+            rm release.json
+          fi
+
+      - name: Mint release-bot token
+        id: release-token
+        # NO `owner:` here. Omitting it scopes the token to THIS repo alone; with
+        # `owner:` the token reaches every repo the App is installed on.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write # createCommitOnBranch + the release tag
+          permission-pull-requests: write # the release PR
+
+      - name: Create release pull request or publish
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+        with:
+          title: "Releasing v${{ env.NEW_VERSION }}"
+          commit: "v${{ env.NEW_VERSION }}"
+          commitMode: github-api # REST-API commits and tags are GPG-signed by GitHub (Verified)
+          publish: yarn changeset publish
+          github-token: ${{ steps.release-token.outputs.token }}
+        env:
+          GITHUB_TOKEN: ${{ steps.release-token.outputs.token }}
+          NPM_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }} # changeset writes this into .npmrc
