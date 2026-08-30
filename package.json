@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "changeset": "changeset",
     "version": "changeset version",
-    "release": "yarn npm publish",
+    "release": "npm publish",
     "prepack": "yarn build"
   },
   "files": [
@@ -36,7 +36,8 @@
     "url": "https://github.com/pendle-finance/boros-mcp/issues"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
