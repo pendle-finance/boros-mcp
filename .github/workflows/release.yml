@@ -1,0 +1,117 @@
+name: Release production package
+
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'pendle-finance/boros-mcp'
+    environment: npm-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # Only actions/checkout uses this token, and only to read. The release
+      # commit, the tag and the version PR all go through the App token below.
+      contents: read
+      id-token: write # mints the OIDC token for npm trusted publishing
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # Deliberately no `registry-url`. Setting it makes setup-node write an
+      # .npmrc holding _authToken=${NODE_AUTH_TOKEN}, which with no token in the
+      # environment resolves to the literal placeholder XXXXX-XXXXX-XXXXX-XXXXX.
+      # npm then sends that on every registry read and `npm info` fails.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      # Pinned to 11.x ON PURPOSE - do not change to npm@latest. Trusted
+      # publishing needs npm >= 11.5.1, but npm@latest is now 12.x, and npm 12
+      # changed `npm info --json` to return an ARRAY where 11 returned an
+      # object. changesets reads `.versions` off it, gets undefined, concludes
+      # the current version was never published, and republishes over it.
+      - name: Install npm 11
+        run: npm install -g npm@11
+
+      - name: Install
+        run: yarn install --immutable
+
+      - name: Prepare pull request message
+        # `changeset status` exits 1 on "packages have been changed but no
+        # changesets were found", a normal state on main after a changeset-less
+        # merge, which under `bash -e` would kill the job. `// empty` also stops
+        # `.releases[0]` yielding the string "null" and logging `Releasing vnull`.
+        run: |
+          yarn changeset status --output=release.json || true
+          if [ -f release.json ]; then
+            echo "NEW_VERSION=$(jq -r '.releases[0].newVersion // empty' release.json)" >> $GITHUB_ENV
+            rm release.json
+          fi
+
+      - name: Mint release-bot token
+        id: release-token
+        # GITHUB_TOKEN cannot open a pull request in this org: the setting
+        # `can_approve_pull_request_reviews = false` blocks CREATE as well as
+        # approve. Re-enabling it is not the fix - it would let a bot satisfy
+        # the required-approval rule on main. An App token is.
+        #
+        # NO `owner:` - that scopes the token to THIS repo alone rather than
+        # every repo the App is installed on.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: 4697663 # pendle-npm-release-bot
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write # createCommitOnBranch + the release tag
+          permission-pull-requests: write # the version PR
+
+      - name: Create release pull request
+        id: changesets
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+        with:
+          title: "Releasing v${{ env.NEW_VERSION }}"
+          commit: "v${{ env.NEW_VERSION }}"
+          commitMode: github-api # push commits/tags via the API so they are signed (Verified)
+          # No NPM_TOKEN anywhere, on purpose. `changeset publish` shells out to
+          # the npm CLI, which performs the OIDC exchange and is matched by npm
+          # against the trusted-publisher record for this repo + this workflow
+          # filename + the npm-production environment. A token here would be
+          # silently preferred over OIDC.
+          #
+          # No version gate either, unlike the three SDK repos. Those needed one
+          # because their packages are RESTRICTED, so an unauthenticated
+          # `npm info` 404s and changesets reads every version as unpublished.
+          # @pendle/boros-mcp is PUBLIC, so that lookup is correct and a
+          # changeset-less merge skips cleanly on its own.
+          publish: yarn changeset publish
+          github-token: ${{ steps.release-token.outputs.token }}
+        env:
+          GITHUB_TOKEN: ${{ steps.release-token.outputs.token }}
+
+      # This repo is PUBLIC, so npm accepts a provenance bundle - the only one
+      # of the five where that is true. Publishing without an attestation must
+      # therefore fail the job rather than pass quietly.
+      - name: Verify provenance
+        if: steps.changesets.outputs.published == 'true'
+        run: |
+          VERSION="$(jq -r '.version' package.json)"
+          echo "checking provenance for @pendle/boros-mcp@${VERSION}"
+          for attempt in 1 2 3 4 5 6; do
+            ATT="$(curl -sf "https://registry.npmjs.org/@pendle/boros-mcp" \
+                   | jq -r --arg v "$VERSION" '.versions[$v].dist.attestations // "absent"')"
+            if [ "$ATT" != "absent" ] && [ "$ATT" != "null" ]; then
+              echo "provenance attestation present"
+              exit 0
+            fi
+            echo "attempt ${attempt}: not visible yet, waiting for registry propagation"
+            sleep 10
+          done
+          echo "::error::published ${VERSION} with no provenance attestation"
+          exit 1
