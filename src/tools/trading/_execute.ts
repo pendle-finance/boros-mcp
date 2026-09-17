@@ -1,6 +1,6 @@
 // Calldata extraction, agent signing orchestration, sim-stage guards, exec-result error reporting.
 import type { Address, Hex } from 'viem';
-import { sendTxsBotPost } from '../../api/send-txs-bot.js';
+import { openApiPost } from '../../api/open-api.js';
 import { bulkSignWithAgent, type IntentExpectation } from '../../agent/signing.js';
 import { analyzeExecution } from '../../utils.js';
 import { errorContent, structuredError, BorosErrorCode } from '../../agent/errors.js';
@@ -17,7 +17,7 @@ export function extractCalldatas(res: any): Hex[] {
 export function extractTxHash(result: any): string | undefined {
   const top = result?.txHash;
   if (typeof top === 'string' && top.length > 0) return top;
-  // send-txs-bot returns a BARE TxResponse[] — the {execution:[...]} form is the wrapped variant.
+  // /v1/send-txs/bulk-calls returns a BARE TxResponse[] — the {execution:[...]} form is the wrapped variant.
   const entries: any[] = Array.isArray(result)
     ? result
     : Array.isArray(result?.execution)
@@ -46,7 +46,7 @@ export async function executeAgentAction(
     options?.intents,
   );
 
-  const response = await sendTxsBotPost('/v2/agent/bulk-direct-call', {
+  const response = await openApiPost('/v1/send-txs/bulk-calls', {
     datas: signedExecutions.map((se) => ({
       agent: se.agent,
       message: se.message,
