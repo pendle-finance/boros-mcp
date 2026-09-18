@@ -162,7 +162,7 @@ const KNOWN_ERROR_SELECTORS: Record<string, { name: string; hint: string }> = {
   '0xbaa2409f': { name: 'AuthSelectorNotAllowed', hint: 'Agent is not authorised for this Router selector. The MCP-issued agent only signs the 12-selector trade allowlist; some Router functions require the root EOA.' },
   '0x231cc7ca': { name: 'AuthInvalidAgent', hint: 'Agent address does not match the expected agent for this root. Re-run setup_agent.' },
 };
-// open-api / send-txs-bot Object.assign upstream NestJS body onto err, so Error.message can be array (validation) or object.
+// open-api Object.assigns the upstream NestJS body onto err, so Error.message can be array (validation) or object.
 export function sanitizeErrorMessage(message: unknown): string {
   if (message == null) return '';
   if (typeof message !== 'string') {
@@ -208,7 +208,7 @@ export function classifyError(err: unknown): BorosErrorCode {
     if (status === 429) return BorosErrorCode.RATE_LIMITED;
     if (status === 503) return BorosErrorCode.API_UNAVAILABLE;
 
-    // open-api.ts/send-txs-bot.ts do `Object.assign(err, JSON.parse(body))` so the
+    // open-api.ts does `Object.assign(err, JSON.parse(body))` so the
     // upstream NestJS `message` field overwrites Error.message — possibly with an
     // array of {property, messages}. Inspect it directly before stringifying.
     const rawMessage = anyErr.message;

@@ -6,7 +6,7 @@ import express from 'express';
 import { encodeFunctionData, recoverTypedDataAddress } from 'viem';
 import type { Address, Hex } from 'viem';
 import { CHAIN_ID, ROUTER_ADDRESS } from '../config.js';
-import { sendTxsBotPost } from '../api/send-txs-bot.js';
+import { openApiPost } from '../api/open-api.js';
 import { fetchWithRetry } from '../lib/fetch-retry.js';
 import { saveAgent } from '../agent/agent-manager.js';
 import {
@@ -140,7 +140,7 @@ export async function handleComplete(req: express.Request, res: express.Response
 
       // Retry so a transient 5xx doesn't wipe the pending key + force a full re-flow.
       const relayResult = await fetchWithRetry(() =>
-        sendTxsBotPost('/v1/agent/approve', { approveAgentCalldata: approveCalldata }),
+        openApiPost('/v1/send-txs/approve', { approveAgentCalldata: approveCalldata }),
       );
 
       // Persist agent meta only after relay accepts the tx — failure path skips agent.json/enc writes.

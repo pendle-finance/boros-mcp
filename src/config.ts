@@ -2,16 +2,13 @@ import path from 'node:path';
 import os from 'node:os';
 
 export const OPEN_API_URL = 'https://api-boros.pendle.finance/apis/';
-// apps/core surface (/v1/collaterals, /v1/configs) — not on open-api. Public (the Boros dapp reads
-// it) but self-described as "LEGACY — internal Core API … may change without notice".
-export const CORE_API_URL = 'https://api-boros.pendle.finance/core/';
-export const SEND_TXS_BOT_URL = 'https://api.boros.finance/send-txs-bot';
 
 export const CROSS_MARKET_ID = 16777215; // 2^24 - 1
 export const DEFAULT_ACCOUNT_ID = 0;
 export const AGENT_EXPIRY_DAYS = 30;
 export const CHAIN_ID = 42161n; // Arbitrum
 export const ROUTER_ADDRESS = '0x8080808080daB95eFED788a9214e400ba552DEf6' as const;
+export const MARKET_HUB_ADDRESS = '0x1080808080f145b14228443212e62447C112ADaD' as const;
 export const DEFAULT_SLIPPAGE = 0.05; // 5%
 export const CONFIG_DIR = path.join(os.homedir(), '.boros-mcp');
 export const AGENT_KEY_FILE = 'agent.enc';
